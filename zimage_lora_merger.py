@@ -706,9 +706,12 @@ class ZImageLoRATrueMerge:
         contributor_count = contributor_count.clamp(min=1.0)
         return result / contributor_count
 
-    def _merge_diffs(self, diffs_with_weights, mode, density=0.5, majority_sign_method="frequency"):
+    def _merge_diffs(self, diffs_with_weights, mode, density=0.5, majority_sign_method="frequency",
+                     compute_device=None):
         """
         Merges a list of diffs with their weights.
+        When compute_device is given, tensors are moved there for faster ops,
+        then the result is returned on CPU.
         """
         if len(diffs_with_weights) == 0:
             return None
@@ -719,36 +722,41 @@ class ZImageLoRATrueMerge:
 
         # All diffs should have the same shape (verified during computation)
         ref_diff = diffs_with_weights[0][0]
-        device = ref_diff.device
         dtype = ref_diff.dtype
+        dev = compute_device if compute_device is not None else ref_diff.device
+        to_cpu = compute_device is not None and compute_device.type != "cpu"
 
         if mode == "weighted_average":
-            result = torch.zeros_like(ref_diff, dtype=torch.float32)
+            result = torch.zeros(ref_diff.shape, dtype=torch.float32, device=dev)
             total_weight = sum(abs(w) for _, w in diffs_with_weights)
             if total_weight == 0:
-                return result.to(dtype)
+                return result.to(dtype).cpu() if to_cpu else result.to(dtype)
             for diff, weight in diffs_with_weights:
-                result += diff.to(device=device, dtype=torch.float32) * (weight / total_weight)
-            return result.to(dtype)
+                result += diff.to(device=dev, dtype=torch.float32) * (weight / total_weight)
+            result = result.to(dtype)
+            return result.cpu() if to_cpu else result
 
         elif mode == "weighted_sum":
-            result = torch.zeros_like(ref_diff, dtype=torch.float32)
+            result = torch.zeros(ref_diff.shape, dtype=torch.float32, device=dev)
             for diff, weight in diffs_with_weights:
-                result += diff.to(device=device, dtype=torch.float32) * weight
-            return result.to(dtype)
+                result += diff.to(device=dev, dtype=torch.float32) * weight
+            result = result.to(dtype)
+            return result.cpu() if to_cpu else result
 
         elif mode == "normalize":
             # Normalization by "energy" (sum of squared weights)
             weights = [w for _, w in diffs_with_weights]
             sum_sq = sum(w*w for w in weights)
             if sum_sq == 0:
-                return torch.zeros_like(ref_diff)
+                z = torch.zeros(ref_diff.shape, device=dev)
+                return z.cpu() if to_cpu else z
             scale = 1.0 / math.sqrt(sum_sq)
 
-            result = torch.zeros_like(ref_diff, dtype=torch.float32)
+            result = torch.zeros(ref_diff.shape, dtype=torch.float32, device=dev)
             for diff, weight in diffs_with_weights:
-                result += diff.to(device=device, dtype=torch.float32) * weight * scale
-            return result.to(dtype)
+                result += diff.to(device=dev, dtype=torch.float32) * weight * scale
+            result = result.to(dtype)
+            return result.cpu() if to_cpu else result
 
         elif mode == "ties":
             # TIES-Merging: Trim, Elect Sign, Disjoint Merge
@@ -757,7 +765,7 @@ class ZImageLoRATrueMerge:
             diffs = []
             abs_weights = []
             for d, w in diffs_with_weights:
-                d_f = d.to(device=device, dtype=torch.float32)
+                d_f = d.to(device=dev, dtype=torch.float32)
                 if w < 0:
                     d_f = -d_f
                 diffs.append(d_f)
@@ -771,7 +779,8 @@ class ZImageLoRATrueMerge:
 
             # Step 3: Disjoint merge
             result = self._ties_disjoint_merge(trimmed, abs_weights, majority_sign)
-            return result.to(dtype)
+            result = result.to(dtype)
+            return result.cpu() if to_cpu else result
 
         return None
     
@@ -1729,7 +1738,8 @@ class ZImageLoRAOptimizer(ZImageLoRATrueMerge):
 
             merged_diff = self._merge_diffs(
                 diffs_list, mode,
-                density=density, majority_sign_method=sign_method
+                density=density, majority_sign_method=sign_method,
+                compute_device=compute_device
             )
 
             if merged_diff is not None:
