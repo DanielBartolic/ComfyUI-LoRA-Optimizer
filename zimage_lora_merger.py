@@ -13,6 +13,10 @@ Author: DanrisiUA (https://github.com/DanrisiUA)
 import torch
 import logging
 import math
+import os
+import json
+import hashlib
+import time
 import folder_paths
 import comfy.utils
 import comfy.sd
@@ -912,13 +916,79 @@ class ZImageLoRAOptimizer(ZImageLoRATrueMerge):
     def __init__(self):
         self.loaded_loras = {}
 
+    def _normalize_stack(self, lora_stack):
+        """
+        Normalize a LoRA stack into a consistent list of dicts.
+
+        Accepts two formats:
+        - Standard tuples: [(lora_name, model_strength, clip_strength), ...]
+          Used by Efficiency Nodes, Comfyroll, and other popular node packs.
+          LoRAs are loaded from disk (cached in self.loaded_loras).
+        - ZImageLoRAStack dicts: [{"name": str, "lora": dict, "strength": float}, ...]
+          Already loaded, clip_strength defaults to None (use global multiplier).
+
+        Returns list of dicts with keys: name, lora, strength, clip_strength.
+        clip_strength is None when the global multiplier should be used.
+        """
+        if not lora_stack:
+            return []
+
+        first = lora_stack[0]
+
+        if isinstance(first, (tuple, list)):
+            # Standard format: (lora_name, model_strength, clip_strength)
+            normalized = []
+            for entry in lora_stack:
+                if not isinstance(entry, (tuple, list)) or len(entry) < 3:
+                    logging.warning("[Z-Image Optimizer] Skipping malformed tuple entry (expected 3 elements)")
+                    continue
+                lora_name, model_str, clip_str = entry[0], entry[1], entry[2]
+
+                # Load LoRA with caching
+                if lora_name in self.loaded_loras:
+                    lora_dict = self.loaded_loras[lora_name]
+                else:
+                    try:
+                        lora_path = folder_paths.get_full_path_or_raise("loras", lora_name)
+                        lora_dict = comfy.utils.load_torch_file(lora_path, safe_load=True)
+                        self.loaded_loras[lora_name] = lora_dict
+                    except Exception as e:
+                        logging.warning(f"[Z-Image Optimizer] Failed to load LoRA '{lora_name}': {e}")
+                        continue
+
+                normalized.append({
+                    "name": lora_name,
+                    "lora": lora_dict,
+                    "strength": model_str,
+                    "clip_strength": clip_str,
+                })
+            return normalized
+
+        elif isinstance(first, dict):
+            # ZImageLoRAStack format: already loaded dicts
+            normalized = []
+            for item in lora_stack:
+                if not isinstance(item, dict) or "lora" not in item or "strength" not in item or "name" not in item:
+                    logging.warning("[Z-Image Optimizer] Skipping malformed dict entry (expected keys: name, lora, strength)")
+                    continue
+                normalized.append({
+                    "name": item["name"],
+                    "lora": item["lora"],
+                    "strength": item["strength"],
+                    "clip_strength": None,  # use global multiplier
+                })
+            return normalized
+
+        logging.warning("[Z-Image Optimizer] Unrecognized stack format")
+        return []
+
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
                 "model": ("MODEL", {"tooltip": "The model to apply LoRA to"}),
                 "clip": ("CLIP", {"tooltip": "The CLIP model"}),
-                "lora_stack": ("LORA_STACK", {"tooltip": "LoRA stack from ZImageLoRAStack"}),
+                "lora_stack": ("LORA_STACK", {"tooltip": "LoRA stack - accepts standard (name, model_str, clip_str) tuples or ZImageLoRAStack dicts"}),
                 "output_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05,
                                               "tooltip": "Strength of the merged effect"}),
             },
@@ -937,6 +1007,59 @@ class ZImageLoRAOptimizer(ZImageLoRATrueMerge):
     FUNCTION = "optimize_merge"
     CATEGORY = "loaders/lora"
     DESCRIPTION = "Auto-analyzes LoRA stack and selects optimal merge strategy. Outputs merged model + analysis report."
+
+    @staticmethod
+    def _compute_cache_key(lora_stack, output_strength, clip_strength_multiplier, auto_strength):
+        """
+        Build a deterministic SHA-256 hash (16 hex chars) from the stack
+        configuration. Used by IS_CHANGED to let ComfyUI skip re-execution
+        when nothing changed.
+        """
+        h = hashlib.sha256()
+        if lora_stack:
+            first = lora_stack[0] if len(lora_stack) > 0 else None
+            entries = []
+            if isinstance(first, (tuple, list)):
+                for entry in lora_stack:
+                    entries.append((str(entry[0]), float(entry[1]), float(entry[2])))
+            elif isinstance(first, dict):
+                for item in lora_stack:
+                    entries.append((str(item.get("name", "")), float(item.get("strength", 0))))
+            entries.sort()
+            h.update(json.dumps(entries).encode())
+        h.update(f"|os={output_strength}|csm={clip_strength_multiplier}|as={auto_strength}".encode())
+        return h.hexdigest()[:16]
+
+    @classmethod
+    def IS_CHANGED(cls, model, clip, lora_stack, output_strength,
+                   clip_strength_multiplier=1.0, auto_strength="disabled"):
+        return cls._compute_cache_key(lora_stack, output_strength,
+                                      clip_strength_multiplier, auto_strength)
+
+    def _save_report_to_disk(self, cache_key, lora_combo, auto_strength, report, selected_params):
+        """
+        Persist the analysis report as JSON for later reference.
+        Saved to {user_dir}/zimage_lora_reports/{cache_key}.json.
+        Failures are silently logged — never blocks the merge.
+        """
+        try:
+            user_dir = folder_paths.get_user_directory()
+            report_dir = os.path.join(user_dir, "zimage_lora_reports")
+            os.makedirs(report_dir, exist_ok=True)
+            report_path = os.path.join(report_dir, f"{cache_key}.json")
+            data = {
+                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "lora_combo": lora_combo,
+                "auto_strength": auto_strength,
+                "report": report,
+                "selected_params": selected_params,
+            }
+            with open(report_path, "w") as f:
+                json.dump(data, f, indent=2)
+            return report_path
+        except Exception as e:
+            logging.warning(f"[Z-Image Optimizer] Failed to save report: {e}")
+            return None
 
     def _sample_conflict(self, diff_a, diff_b):
         """
@@ -1195,17 +1318,12 @@ class ZImageLoRAOptimizer(ZImageLoRATrueMerge):
         2. Analyze: sign conflicts, magnitude ratio -> auto-select params
         3. Merge with chosen params, build report
         """
-        # Filter zero-strength LoRAs and validate stack entries
+        # Normalize stack format (standard tuples or ZImageLoRAStack dicts)
         if not lora_stack or len(lora_stack) == 0:
             return (model, clip, "No LoRAs in stack.")
 
-        active_loras = []
-        for item in lora_stack:
-            if not isinstance(item, dict) or "lora" not in item or "strength" not in item or "name" not in item:
-                logging.warning("Z-Image LoRA Optimizer: skipping malformed stack entry (expected keys: name, lora, strength)")
-                continue
-            if item["strength"] != 0:
-                active_loras.append(item)
+        normalized_stack = self._normalize_stack(lora_stack)
+        active_loras = [item for item in normalized_stack if item["strength"] != 0]
 
         if len(active_loras) == 0:
             return (model, clip, "No LoRAs in stack (all zero strength or malformed).")
@@ -1218,9 +1336,12 @@ class ZImageLoRAOptimizer(ZImageLoRATrueMerge):
             lora_dict = item["lora"]
             strength = item["strength"]
 
-            clip_strength = output_strength * clip_strength_multiplier
+            if item["clip_strength"] is not None:
+                clip_str = item["clip_strength"]
+            else:
+                clip_str = strength * clip_strength_multiplier
             new_model, new_clip = comfy.sd.load_lora_for_models(
-                model, clip, lora_dict, output_strength * strength, clip_strength * strength
+                model, clip, lora_dict, output_strength * strength, output_strength * clip_str
             )
 
             report = (
@@ -1235,7 +1356,8 @@ class ZImageLoRAOptimizer(ZImageLoRATrueMerge):
             )
             return (new_model, new_clip, report)
 
-        logging.info(f"Z-Image LoRA Optimizer: analyzing {len(active_loras)} LoRAs")
+        logging.info(f"[Z-Image Optimizer] Starting analysis of {len(active_loras)} LoRAs")
+        t_start = time.time()
 
         # Get key maps
         model_keys = {}
@@ -1263,6 +1385,9 @@ class ZImageLoRAOptimizer(ZImageLoRATrueMerge):
         #   lora_index stripped to (diff, strength) pairs before Phase 3
         # per_lora_diffs[lora_prefix][lora_index] = diff  (for pairwise analysis)
         # all_key_targets[lora_prefix] = (target_key, is_clip)
+        logging.info("[Z-Image Optimizer] Phase 1: Computing weight diffs...")
+        logging.info(f"[Z-Image Optimizer]   {len(all_lora_prefixes)} key prefixes to analyze across {len(active_loras)} LoRAs")
+        t_phase1 = time.time()
         all_key_diffs = {}
         all_key_targets = {}
         per_lora_diffs = {}
@@ -1278,7 +1403,7 @@ class ZImageLoRAOptimizer(ZImageLoRATrueMerge):
         estimated_diffs = len(active_loras) * len(all_lora_prefixes)
         if estimated_diffs > 2000:
             logging.warning(
-                f"Z-Image LoRA Optimizer: analyzing up to {estimated_diffs} diff tensors. "
+                f"[Z-Image Optimizer] Analyzing up to {estimated_diffs} diff tensors. "
                 "This may use significant memory. Consider ZImageLoRATrueMerge for large stacks."
             )
 
@@ -1329,12 +1454,19 @@ class ZImageLoRAOptimizer(ZImageLoRATrueMerge):
                 diff = self._compute_lora_diff(mat_up, mat_down, alpha, mid, target_shape)
 
                 if diff is not None:
-                    diffs_for_key.append((diff, item["strength"], i))
+                    # For CLIP keys, use per-LoRA clip_strength when available
+                    if is_clip and item["clip_strength"] is not None:
+                        eff_strength = item["clip_strength"]
+                    else:
+                        eff_strength = item["strength"]
+                    diffs_for_key.append((diff, eff_strength, i))
                     # Store sign-corrected diff for conflict analysis;
                     # negative strength inverts the LoRA's direction
-                    lora_diffs_for_key[i] = diff if item["strength"] >= 0 else -diff
+                    lora_diffs_for_key[i] = diff if eff_strength >= 0 else -diff
                     per_lora_stats[i]["ranks"].append(rank)
                     per_lora_stats[i]["key_count"] += 1
+                    # Always use model strength for l2_norms so _compute_auto_strengths
+                    # can correctly undo the weighting (it divides by model strength)
                     per_lora_stats[i]["l2_norms"].append(diff.float().norm().item() * abs(item["strength"]))
                 else:
                     skipped_keys += 1
@@ -1347,6 +1479,15 @@ class ZImageLoRAOptimizer(ZImageLoRATrueMerge):
         if len(all_key_diffs) == 0:
             return (model, clip, "No compatible LoRA keys found. "
                     "LoRAs may be incompatible with this model architecture.")
+
+        # Log per-LoRA summaries
+        total_diffs = sum(len(v) for v in all_key_diffs.values())
+        for i, stat in enumerate(per_lora_stats):
+            avg_r = sum(stat["ranks"]) / len(stat["ranks"]) if stat["ranks"] else 0
+            logging.info(f"[Z-Image Optimizer]   {stat['name']} ({i+1}/{len(active_loras)}): "
+                         f"{stat['key_count']} keys, avg rank {avg_r:.0f}")
+        logging.info(f"[Z-Image Optimizer]   Total: {len(all_key_diffs)} prefixes, "
+                     f"{total_diffs} diffs ({time.time() - t_phase1:.1f}s)")
 
         # Finalize per-LoRA stats
         lora_stats = []
@@ -1364,6 +1505,8 @@ class ZImageLoRAOptimizer(ZImageLoRATrueMerge):
             })
 
         # Phase 2: Pairwise sign conflict analysis
+        logging.info("[Z-Image Optimizer] Phase 2: Analyzing conflicts...")
+        t_phase2 = time.time()
         pairwise_conflicts = []
         total_overlap = 0
         total_conflict = 0
@@ -1394,8 +1537,10 @@ class ZImageLoRAOptimizer(ZImageLoRATrueMerge):
                     "conflicts": pair_conflict,
                     "ratio": ratio,
                 })
+                logging.info(f"[Z-Image Optimizer]   {pair_label} -> {ratio:.1%} conflict")
 
         avg_conflict_ratio = total_conflict / total_overlap if total_overlap > 0 else 0
+        logging.info(f"[Z-Image Optimizer]   Average conflict ratio: {avg_conflict_ratio:.1%} ({time.time() - t_phase2:.1f}s)")
 
         # Magnitude ratio
         valid_l2 = [m for m in l2_means if m > 0]
@@ -1416,7 +1561,10 @@ class ZImageLoRAOptimizer(ZImageLoRATrueMerge):
             avg_conflict_ratio, magnitude_ratio, all_key_diffs
         )
 
-        logging.info(f"Z-Image LoRA Optimizer: auto-selected mode={mode}, density={density:.2f}, sign={sign_method}")
+        logging.info(f"[Z-Image Optimizer] Decision: {mode} (conflict {avg_conflict_ratio:.1%} "
+                     f"{'>' if avg_conflict_ratio > 0.25 else '<='} 25% threshold)")
+        if mode == "ties":
+            logging.info(f"[Z-Image Optimizer]   density={density:.2f}, sign_method={sign_method}")
 
         # Drop analysis index (tensors remain live in all_key_diffs until Phase 3)
         del per_lora_diffs
@@ -1426,14 +1574,21 @@ class ZImageLoRAOptimizer(ZImageLoRATrueMerge):
         if auto_strength == "enabled":
             new_strengths, strength_reasoning = self._compute_auto_strengths(active_loras, lora_stats)
 
-            # Build strength map: lora_index -> new_strength
-            strength_map = {i: new_strengths[i] for i in range(len(active_loras))}
+            # Compute per-LoRA scale ratio so we can apply it to both model
+            # and clip strengths (new_strengths only contains model strengths)
+            scale_ratios = {}
+            for i in range(len(active_loras)):
+                orig = active_loras[i]["strength"]
+                if abs(orig) > 1e-9:
+                    scale_ratios[i] = new_strengths[i] / orig
+                else:
+                    scale_ratios[i] = 1.0
 
-            # Rebuild all_key_diffs with new strengths, stripping lora_index
+            # Rebuild all_key_diffs with scaled strengths, stripping lora_index
             for lora_prefix in all_key_diffs:
                 all_key_diffs[lora_prefix] = [
-                    (diff, strength_map[idx])
-                    for diff, _old_strength, idx in all_key_diffs[lora_prefix]
+                    (diff, old_strength * scale_ratios[idx])
+                    for diff, old_strength, idx in all_key_diffs[lora_prefix]
                 ]
 
             # Update lora_stats with new strengths
@@ -1448,7 +1603,10 @@ class ZImageLoRAOptimizer(ZImageLoRATrueMerge):
                 "names": [item["name"] for item in active_loras],
             }
 
-            logging.info(f"Z-Image LoRA Optimizer: auto-strength applied, scale={strength_reasoning[0]}")
+            logging.info(f"[Z-Image Optimizer] Auto-strength: {strength_reasoning[0]}")
+            for i in range(len(active_loras)):
+                logging.info(f"[Z-Image Optimizer]   {active_loras[i]['name']}: "
+                             f"{active_loras[i]['strength']} -> {new_strengths[i]:.4f}")
         else:
             # Strip lora_index from triples -> (diff, strength) pairs for _merge_diffs
             for lora_prefix in all_key_diffs:
@@ -1458,6 +1616,8 @@ class ZImageLoRAOptimizer(ZImageLoRATrueMerge):
                 ]
 
         # Phase 3: Merge using stored diffs
+        logging.info(f"[Z-Image Optimizer] Phase 3: Merging {len(all_key_diffs)} keys...")
+        t_phase3 = time.time()
         model_patches = {}
         clip_patches = {}
         processed_keys = 0
@@ -1477,11 +1637,23 @@ class ZImageLoRAOptimizer(ZImageLoRATrueMerge):
                     model_patches[target_key] = ("diff", (merged_diff,))
                 processed_keys += 1
 
+        logging.info(f"[Z-Image Optimizer]   Model patches: {len(model_patches)}, "
+                     f"CLIP patches: {len(clip_patches)} ({time.time() - t_phase3:.1f}s)")
+
         # Apply patches
         new_model = model
         new_clip = clip
 
-        clip_strength_out = output_strength * clip_strength_multiplier
+        # If ALL LoRAs have explicit clip_strength (standard tuple format),
+        # clip strengths are already baked into the diffs — skip global multiplier.
+        # If ANY lack it (dict format), apply the multiplier for those LoRAs.
+        # Mixed stacks: multiplier applies since dict-format LoRAs need it and
+        # tuple-format LoRAs already baked their clip_strength into the diff weight.
+        all_explicit_clip = all(item["clip_strength"] is not None for item in active_loras)
+        if all_explicit_clip:
+            clip_strength_out = output_strength
+        else:
+            clip_strength_out = output_strength * clip_strength_multiplier
 
         if model is not None and len(model_patches) > 0:
             new_model = model.clone()
@@ -1506,7 +1678,16 @@ class ZImageLoRAOptimizer(ZImageLoRATrueMerge):
             auto_strength_info=auto_strength_info
         )
 
-        logging.info(f"Z-Image LoRA Optimizer: done. {processed_keys} keys processed.")
+        # Save report to disk for later reference
+        cache_key = self._compute_cache_key(lora_stack, output_strength,
+                                            clip_strength_multiplier, auto_strength)
+        lora_combo = [[item["name"], item["strength"]] for item in active_loras]
+        selected_params = {"mode": mode, "density": density, "sign_method": sign_method}
+        report_path = self._save_report_to_disk(cache_key, lora_combo, auto_strength, report, selected_params)
+        if report_path:
+            logging.info(f"[Z-Image Optimizer] Report saved to: {report_path}")
+
+        logging.info(f"[Z-Image Optimizer] Done! {processed_keys} keys processed ({time.time() - t_start:.1f}s total)")
 
         return (new_model, new_clip, report)
 
