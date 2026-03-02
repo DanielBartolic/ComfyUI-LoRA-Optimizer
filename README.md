@@ -143,9 +143,24 @@ The auto-optimizer. Takes a `LORA_STACK`, analyzes the LoRAs, and automatically 
 | Magnitude ratio <= 2x | `frequency` sign method (equal votes) |
 | TIES mode selected | Auto-density estimated from magnitude distribution |
 
-**Inputs:** `MODEL`, `CLIP`, `LORA_STACK`, output strength, clip strength multiplier.
+**Inputs:** `MODEL`, `CLIP`, `LORA_STACK`, output strength, clip strength multiplier, auto strength.
 
 **Outputs:** `MODEL`, `CLIP`, `STRING` (analysis report)
+
+#### Auto-Strength
+
+When `auto_strength` is set to `enabled`, the optimizer automatically reduces per-LoRA strengths before merging to prevent overexposure from stacking. This is especially useful on distilled/turbo models where 2+ LoRAs at full strength cause blown-out results even with optimal merge mode selection.
+
+The algorithm uses **L2-aware energy normalization**: it measures each LoRA's actual weight magnitude (L2 norms collected during analysis) and scales all strengths so the total combined energy matches what the strongest single LoRA would contribute alone.
+
+| Scenario | Result |
+|----------|--------|
+| 2 equal LoRAs at strength 1.0 | Each reduced to ~0.71 (1/sqrt(2)) |
+| 1 strong + 1 weak LoRA | Proportional reduction, preserving ratio |
+| Single LoRA | No change (scale = 1.0) |
+| `auto_strength` disabled | No adjustment (default) |
+
+Your original strength ratios are always preserved — the algorithm only scales them down uniformly.
 
 **Example report output:**
 ```
@@ -164,6 +179,12 @@ Z-IMAGE LORA OPTIMIZER - ANALYSIS REPORT
     Keys: 192
     Avg rank: 32
     L2 norm (mean): 0.0423
+
+--- Auto-Strength Adjustment ---
+  style_lora.safetensors: 1.0 -> 0.7071
+  detail_lora.safetensors: 0.8 -> 0.5657
+  Scale factor: 0.7071
+  Method: L2-aware energy normalization
 
 --- Pairwise Analysis ---
   style_lora.safetensors vs detail_lora.safetensors:

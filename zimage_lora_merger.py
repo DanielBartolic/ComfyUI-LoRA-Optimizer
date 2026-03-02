@@ -925,6 +925,10 @@ class ZImageLoRAOptimizer(ZImageLoRATrueMerge):
             "optional": {
                 "clip_strength_multiplier": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05,
                                                        "tooltip": "Strength multiplier for CLIP"}),
+                "auto_strength": (["disabled", "enabled"], {
+                    "default": "disabled",
+                    "tooltip": "Auto-reduce LoRA strengths to prevent overexposure from stacking"
+                }),
             }
         }
 
@@ -973,7 +977,8 @@ class ZImageLoRAOptimizer(ZImageLoRATrueMerge):
         g = torch.Generator().manual_seed(42)
 
         for key, diffs_list in all_key_diffs.items():
-            for diff, strength in diffs_list:
+            for entry in diffs_list:
+                diff, strength = entry[0], entry[1]
                 flat = diff.flatten().abs().float().cpu() * abs(strength)
                 n = flat.numel()
                 if n > max_samples_per_key:
@@ -997,6 +1002,72 @@ class ZImageLoRAOptimizer(ZImageLoRATrueMerge):
         above_noise = (all_samples > noise_floor).float().mean().item()
 
         return max(0.1, min(0.9, above_noise))
+
+    def _compute_auto_strengths(self, active_loras, lora_stats):
+        """
+        Compute reduced per-LoRA strengths using L2-aware energy normalization.
+        Scales strengths so the total combined energy matches the strongest
+        single LoRA's contribution, preventing overexposure from stacking.
+
+        Returns (new_strengths, reasoning_lines) where new_strengths is a list
+        of floats (one per active LoRA) and reasoning_lines is a list of strings.
+        """
+        n = len(active_loras)
+        original_strengths = [item["strength"] for item in active_loras]
+        reasoning = []
+
+        # Compute raw (un-strength-weighted) L2 norms per LoRA
+        raw_l2 = []
+        for i, stat in enumerate(lora_stats):
+            s = abs(original_strengths[i])
+            l2 = stat["l2_mean"]
+            if s > 0 and l2 > 0:
+                raw_l2.append(l2 / s)
+            else:
+                raw_l2.append(0.0)
+
+        # Effective contribution: abs(strength) * raw_l2 = l2_mean (the roundtrip
+        # cancels out), but keeping the decomposition clarifies intent: raw_l2 is
+        # intrinsic LoRA magnitude, strength is the user-set scaling.
+        effective = [abs(original_strengths[i]) * raw_l2[i] for i in range(n)]
+
+        # Filter out zero contributions
+        nonzero = [e for e in effective if e > 0]
+        if len(nonzero) <= 1:
+            # 0 or 1 contributing LoRAs: no reduction needed
+            reasoning.append("Single contributing LoRA or none — no strength adjustment needed")
+            return (list(original_strengths), reasoning)
+
+        # Current combined energy: sqrt(sum(effective[i]^2))
+        current_energy = math.sqrt(sum(e * e for e in effective))
+
+        # Reference energy: what the strongest single LoRA contributes alone
+        reference_energy = max(effective)
+
+        # Scale factor
+        if current_energy > 0:
+            scale = reference_energy / current_energy
+        else:
+            scale = 1.0
+
+        # Apply scale to all strengths
+        new_strengths = []
+        for i in range(n):
+            if effective[i] > 0:
+                new_strengths.append(original_strengths[i] * scale)
+            else:
+                new_strengths.append(original_strengths[i])
+
+        # Build reasoning
+        reasoning.append(f"Scale factor: {scale:.4f}")
+        reasoning.append("Method: L2-aware energy normalization")
+        for i in range(n):
+            if effective[i] > 0 and abs(scale - 1.0) > 1e-9:
+                reasoning.append(f"  {active_loras[i]['name']}: {original_strengths[i]} -> {new_strengths[i]:.4f}")
+            else:
+                reasoning.append(f"  {active_loras[i]['name']}: {original_strengths[i]} (unchanged)")
+
+        return (new_strengths, reasoning)
 
     def _auto_select_params(self, avg_conflict_ratio, magnitude_ratio, all_key_diffs):
         """
@@ -1038,7 +1109,8 @@ class ZImageLoRAOptimizer(ZImageLoRATrueMerge):
         return (mode, density, sign_method, reasoning)
 
     def _build_report(self, lora_stats, pairwise_conflicts, collection_stats,
-                      mode, density, sign_method, reasoning, merge_summary):
+                      mode, density, sign_method, reasoning, merge_summary,
+                      auto_strength_info=None):
         """Format analysis as a multi-line report string."""
         lines = []
         lines.append("=" * 50)
@@ -1050,7 +1122,7 @@ class ZImageLoRAOptimizer(ZImageLoRATrueMerge):
         lines.append("--- Per-LoRA Analysis ---")
         for stat in lora_stats:
             lines.append(f"  {stat['name']}:")
-            lines.append(f"    Strength: {stat['strength']}")
+            lines.append(f"    Strength: {stat.get('original_strength', stat['strength'])}")
             lines.append(f"    Keys: {stat['key_count']}")
             if stat['key_count'] > 0:
                 lines.append(f"    Avg rank: {stat['avg_rank']:.0f}")
@@ -1058,6 +1130,17 @@ class ZImageLoRAOptimizer(ZImageLoRATrueMerge):
             else:
                 lines.append(f"    Avg rank: N/A (no compatible keys)")
                 lines.append(f"    L2 norm (mean): N/A")
+
+        # Auto-Strength Adjustment (between Per-LoRA and Pairwise)
+        if auto_strength_info is not None:
+            lines.append("")
+            lines.append("--- Auto-Strength Adjustment ---")
+            for i, name in enumerate(auto_strength_info["names"]):
+                orig = auto_strength_info["original_strengths"][i]
+                new = auto_strength_info["new_strengths"][i]
+                lines.append(f"  {name}: {orig} -> {new:.4f}")
+            for r in auto_strength_info["reasoning"]:
+                lines.append(f"  {r}")
 
         # Pairwise Analysis
         if pairwise_conflicts:
@@ -1105,7 +1188,7 @@ class ZImageLoRAOptimizer(ZImageLoRATrueMerge):
         lines.append("=" * 50)
         return "\n".join(lines)
 
-    def optimize_merge(self, model, clip, lora_stack, output_strength, clip_strength_multiplier=1.0):
+    def optimize_merge(self, model, clip, lora_stack, output_strength, clip_strength_multiplier=1.0, auto_strength="disabled"):
         """
         Main entry point. Three phases:
         1. Compute diffs + collect per-LoRA stats
@@ -1129,6 +1212,7 @@ class ZImageLoRAOptimizer(ZImageLoRATrueMerge):
 
         # Single LoRA: skip analysis, apply directly via ComfyUI's standard
         # additive LoRA application (faster than diff-based pipeline).
+        # auto_strength is a no-op with a single LoRA (scale would be 1.0).
         if len(active_loras) == 1:
             item = active_loras[0]
             lora_dict = item["lora"]
@@ -1175,7 +1259,8 @@ class ZImageLoRAOptimizer(ZImageLoRATrueMerge):
                         break
 
         # Phase 1: Compute diffs and collect per-LoRA stats
-        # all_key_diffs[lora_prefix] = list of (diff, strength) for _merge_diffs
+        # all_key_diffs[lora_prefix] = list of (diff, strength, lora_index) triples
+        #   lora_index stripped to (diff, strength) pairs before Phase 3
         # per_lora_diffs[lora_prefix][lora_index] = diff  (for pairwise analysis)
         # all_key_targets[lora_prefix] = (target_key, is_clip)
         all_key_diffs = {}
@@ -1244,7 +1329,7 @@ class ZImageLoRAOptimizer(ZImageLoRATrueMerge):
                 diff = self._compute_lora_diff(mat_up, mat_down, alpha, mid, target_shape)
 
                 if diff is not None:
-                    diffs_for_key.append((diff, item["strength"]))
+                    diffs_for_key.append((diff, item["strength"], i))
                     # Store sign-corrected diff for conflict analysis;
                     # negative strength inverts the LoRA's direction
                     lora_diffs_for_key[i] = diff if item["strength"] >= 0 else -diff
@@ -1336,6 +1421,42 @@ class ZImageLoRAOptimizer(ZImageLoRATrueMerge):
         # Drop analysis index (tensors remain live in all_key_diffs until Phase 3)
         del per_lora_diffs
 
+        # Auto-strength adjustment: reduce per-LoRA strengths to prevent overexposure
+        auto_strength_info = None
+        if auto_strength == "enabled":
+            new_strengths, strength_reasoning = self._compute_auto_strengths(active_loras, lora_stats)
+
+            # Build strength map: lora_index -> new_strength
+            strength_map = {i: new_strengths[i] for i in range(len(active_loras))}
+
+            # Rebuild all_key_diffs with new strengths, stripping lora_index
+            for lora_prefix in all_key_diffs:
+                all_key_diffs[lora_prefix] = [
+                    (diff, strength_map[idx])
+                    for diff, _old_strength, idx in all_key_diffs[lora_prefix]
+                ]
+
+            # Update lora_stats with new strengths
+            for i, stat in enumerate(lora_stats):
+                stat["original_strength"] = stat["strength"]
+                stat["strength"] = new_strengths[i]
+
+            auto_strength_info = {
+                "reasoning": strength_reasoning,
+                "original_strengths": [item["strength"] for item in active_loras],
+                "new_strengths": new_strengths,
+                "names": [item["name"] for item in active_loras],
+            }
+
+            logging.info(f"Z-Image LoRA Optimizer: auto-strength applied, scale={strength_reasoning[0]}")
+        else:
+            # Strip lora_index from triples -> (diff, strength) pairs for _merge_diffs
+            for lora_prefix in all_key_diffs:
+                all_key_diffs[lora_prefix] = [
+                    (diff, strength)
+                    for diff, strength, _idx in all_key_diffs[lora_prefix]
+                ]
+
         # Phase 3: Merge using stored diffs
         model_patches = {}
         clip_patches = {}
@@ -1381,7 +1502,8 @@ class ZImageLoRAOptimizer(ZImageLoRATrueMerge):
 
         report = self._build_report(
             lora_stats, pairwise_conflicts, collection_stats,
-            mode, density, sign_method, reasoning, merge_summary
+            mode, density, sign_method, reasoning, merge_summary,
+            auto_strength_info=auto_strength_info
         )
 
         logging.info(f"Z-Image LoRA Optimizer: done. {processed_keys} keys processed.")

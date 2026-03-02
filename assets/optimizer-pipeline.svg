@@ -1,11 +1,11 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 280">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 320">
   <defs>
     <linearGradient id="pbg" x1="0%" y1="0%" x2="100%" y2="100%">
       <stop offset="0%" style="stop-color:#1a1a2e"/>
       <stop offset="100%" style="stop-color:#16213e"/>
     </linearGradient>
   </defs>
-  <rect width="900" height="280" rx="12" fill="url(#pbg)"/>
+  <rect width="900" height="320" rx="12" fill="url(#pbg)"/>
 
   <text x="450" y="32" font-family="Segoe UI, Arial, sans-serif" font-size="14" fill="#64ffda" text-anchor="middle" font-weight="700" letter-spacing="2">OPTIMIZER PIPELINE</text>
 
@@ -56,7 +56,12 @@
   <text x="750" y="208" font-family="Segoe UI, Arial, sans-serif" font-size="10" fill="#64ffda" text-anchor="middle">Outputs: MODEL + CLIP</text>
   <text x="750" y="223" font-family="Segoe UI, Arial, sans-serif" font-size="10" fill="#64ffda" text-anchor="middle">+ detailed analysis report</text>
 
+  <!-- Auto-Strength box (optional step between Phase 2 and Phase 3) -->
+  <rect x="330" y="235" width="540" height="40" rx="8" fill="#1e2a3a" stroke="#f59e0b" stroke-width="1" stroke-dasharray="4,3"/>
+  <text x="345" y="259" font-family="Segoe UI, Arial, sans-serif" font-size="11" fill="#f59e0b" font-weight="700">AUTO-STRENGTH</text>
+  <text x="472" y="259" font-family="Segoe UI, Arial, sans-serif" font-size="10" fill="#8892b0">(optional)  L2-aware energy normalization reduces per-LoRA strengths to prevent overexposure</text>
+
   <!-- Bottom note -->
-  <text x="450" y="252" font-family="Segoe UI, Arial, sans-serif" font-size="11" fill="#8892b0" text-anchor="middle">Single-pass: diffs computed once in Phase 1, reused for analysis (Phase 2) and merge (Phase 3)</text>
-  <text x="450" y="270" font-family="Segoe UI, Arial, sans-serif" font-size="11" fill="#8892b0" text-anchor="middle">Compatible with Flux, SDXL, SD 1.5, and all LoRA formats including LoCon</text>
+  <text x="450" y="296" font-family="Segoe UI, Arial, sans-serif" font-size="11" fill="#8892b0" text-anchor="middle">Single-pass: diffs computed once in Phase 1, reused for analysis (Phase 2) and merge (Phase 3)</text>
+  <text x="450" y="312" font-family="Segoe UI, Arial, sans-serif" font-size="11" fill="#8892b0" text-anchor="middle">Compatible with Flux, SDXL, SD 1.5, and all LoRA formats including LoCon</text>
 </svg>
