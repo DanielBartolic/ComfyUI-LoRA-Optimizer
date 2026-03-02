@@ -942,7 +942,7 @@ class LoRAOptimizer(_LoRAMergeBase):
 
     def _build_report(self, lora_stats, pairwise_conflicts, collection_stats,
                       mode, density, sign_method, reasoning, merge_summary,
-                      auto_strength_info=None):
+                      auto_strength_info=None, strategy_counts=None, optimization_mode="global"):
         """Format analysis as a multi-line report string."""
         lines = []
         lines.append("=" * 50)
@@ -998,6 +998,25 @@ class LoRAOptimizer(_LoRAMergeBase):
         if mode == "ties":
             lines.append(f"  Density: {density:.2f}")
             lines.append(f"  Sign method: {sign_method}")
+        if optimization_mode == "per_prefix":
+            lines.append("  (global fallback — each prefix uses its own parameters)")
+
+        # Per-Prefix Strategy breakdown (only in per_prefix mode)
+        if optimization_mode == "per_prefix" and strategy_counts:
+            lines.append("")
+            lines.append("--- Per-Prefix Strategy ---")
+            total_pf = sum(strategy_counts.values())
+            if total_pf > 0:
+                if strategy_counts.get("weighted_sum", 0) > 0:
+                    n = strategy_counts["weighted_sum"]
+                    lines.append(f"  weighted_sum (single LoRA):      {n:>4} prefixes ({n/total_pf:.0%})")
+                if strategy_counts.get("weighted_average", 0) > 0:
+                    n = strategy_counts["weighted_average"]
+                    lines.append(f"  weighted_average (low conflict):  {n:>4} prefixes ({n/total_pf:.0%})")
+                if strategy_counts.get("ties", 0) > 0:
+                    n = strategy_counts["ties"]
+                    lines.append(f"  ties (high conflict):            {n:>4} prefixes ({n/total_pf:.0%})")
+                lines.append(f"  Total:                           {total_pf:>4} prefixes")
 
         # Reasoning
         lines.append("")
@@ -1484,7 +1503,9 @@ class LoRAOptimizer(_LoRAMergeBase):
         report = self._build_report(
             lora_stats, pairwise_conflicts, collection_stats,
             mode, density, sign_method, reasoning, merge_summary,
-            auto_strength_info=auto_strength_info
+            auto_strength_info=auto_strength_info,
+            strategy_counts=strategy_counts if optimization_mode == "per_prefix" else None,
+            optimization_mode=optimization_mode
         )
 
         # Cache patches for re-use (single entry to limit memory)
@@ -1492,7 +1513,9 @@ class LoRAOptimizer(_LoRAMergeBase):
 
         # Save report to disk for later reference
         lora_combo = [[item["name"], item["strength"]] for item in active_loras]
-        selected_params = {"mode": mode, "density": density, "sign_method": sign_method}
+        selected_params = {"mode": mode, "density": density, "sign_method": sign_method, "optimization_mode": optimization_mode}
+        if optimization_mode == "per_prefix":
+            selected_params["strategy_counts"] = dict(strategy_counts)
         report_path = self._save_report_to_disk(cache_key, lora_combo, auto_strength, report, selected_params)
         if report_path:
             logging.info(f"[LoRA Optimizer] Report saved to: {report_path}")
