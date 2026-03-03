@@ -1,10 +1,9 @@
 import { app } from "/scripts/app.js";
 
-// Widget hide/show via type-mangling (standard ComfyUI pattern)
 const HIDDEN_TAG = "loraopt_hidden";
 const origProps = {};
 
-function toggleWidget(node, widget, show) {
+function toggleWidget(node, widget, show, suffix = "") {
     if (!widget) return;
 
     if (!origProps[widget.name]) {
@@ -14,14 +13,15 @@ function toggleWidget(node, widget, show) {
         };
     }
 
-    widget.type = show ? origProps[widget.name].origType : HIDDEN_TAG;
+    widget.hidden = !show;
+    widget.type = show ? origProps[widget.name].origType : HIDDEN_TAG + suffix;
     widget.computeSize = show
         ? origProps[widget.name].origComputeSize
         : () => [0, -4];
 
     if (widget.linkedWidgets) {
         for (const w of widget.linkedWidgets) {
-            toggleWidget(node, w, show);
+            toggleWidget(node, w, show, ":" + widget.name);
         }
     }
 }
@@ -50,6 +50,7 @@ function updateVisibility(node) {
 
     const newHeight = node.computeSize()[1];
     node.setSize([node.size[0], newHeight]);
+    app.canvas?.setDirty?.(true, true);
 }
 
 app.registerExtension({
@@ -86,7 +87,7 @@ app.registerExtension({
             });
         }
 
-        // Initial visibility update (after a tick so widgets are fully initialized)
-        requestAnimationFrame(() => updateVisibility(node));
+        // Initial visibility update — delay to ensure widgets are fully initialized
+        setTimeout(() => updateVisibility(node), 100);
     },
 });
