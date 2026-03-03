@@ -100,8 +100,10 @@ class _LoRAMergeBase:
             return 'zimage'
         if any('lora_unet_layers_' in k and 'attention' in k.lower() for k in keys):
             return 'zimage'
-        # single_transformer_blocks WITHOUT transformer. prefix = Z-Image
-        if any('single_transformer_blocks' in k and 'transformer.single_transformer_blocks' not in k
+        # single_transformer_blocks WITHOUT transformer. or Kohya transformer_ prefix = Z-Image
+        if any('single_transformer_blocks' in k
+               and 'transformer.single_transformer_blocks' not in k
+               and 'transformer_single_transformer_blocks' not in k
                for k in keys):
             return 'zimage'
 
@@ -347,6 +349,8 @@ class _LoRAMergeBase:
             # LyCORIS/aitoolkit format
             if new_k.startswith('lycoris_blocks_'):
                 new_k = new_k.replace('lycoris_blocks_', 'blocks.')
+                # Add dot separator after block number
+                new_k = re.sub(r'^blocks\.(\d+)_', r'blocks.\1.', new_k)
                 new_k = new_k.replace('_cross_attn_', '.cross_attn.')
                 new_k = new_k.replace('_self_attn_', '.self_attn.')
                 new_k = new_k.replace('_ffn_net_0_proj', '.ffn.0')
@@ -1114,8 +1118,13 @@ class LoRAOptimizer(_LoRAMergeBase):
 
         # Architecture-aware key normalization
         if normalize_keys == "enabled" and len(normalized) > 0:
-            first_sd = normalized[0]["lora"]
-            arch = self._detect_architecture(first_sd)
+            # Detect from first LoRA that yields a known architecture
+            arch = "unknown"
+            for item in normalized:
+                detected = self._detect_architecture(item["lora"])
+                if detected != "unknown":
+                    arch = detected
+                    break
             if arch != "unknown":
                 logging.info(f"[LoRA Optimizer] Architecture detected: {arch}")
                 logging.info(f"[LoRA Optimizer] Normalizing keys for {len(normalized)} LoRAs...")
