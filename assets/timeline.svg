@@ -1,0 +1,193 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 1520" width="900" height="1520">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#0f172a"/>
+      <stop offset="50%" style="stop-color:#1e1b4b"/>
+      <stop offset="100%" style="stop-color:#0f172a"/>
+    </linearGradient>
+    <linearGradient id="line-grad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#e94560"/>
+      <stop offset="50%" style="stop-color:#a78bfa"/>
+      <stop offset="100%" style="stop-color:#22c55e"/>
+    </linearGradient>
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="3" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="shadow">
+      <feDropShadow dx="0" dy="2" stdDeviation="4" flood-color="#000" flood-opacity="0.4"/>
+    </filter>
+  </defs>
+
+  <!-- Background -->
+  <rect width="900" height="1520" fill="url(#bg)" rx="16"/>
+
+  <!-- Title -->
+  <text x="450" y="56" font-family="Segoe UI, Arial, sans-serif" font-size="32" font-weight="700" fill="#ffffff" text-anchor="middle" letter-spacing="-0.5">LoRA Optimizer</text>
+  <text x="450" y="82" font-family="Segoe UI, Arial, sans-serif" font-size="14" fill="#94a3b8" text-anchor="middle" letter-spacing="2">DEVELOPMENT TIMELINE</text>
+
+  <!-- Central timeline line -->
+  <line x1="450" y1="110" x2="450" y2="1480" stroke="url(#line-grad)" stroke-width="3" opacity="0.5"/>
+
+  <!-- === Milestone 1: Initial Release === -->
+  <circle cx="450" cy="150" r="10" fill="#e94560" filter="url(#glow)"/>
+  <circle cx="450" cy="150" r="4" fill="#fff"/>
+  <!-- Card LEFT -->
+  <rect x="60" y="122" width="350" height="56" rx="10" fill="#1e293b" stroke="#334155" stroke-width="1" filter="url(#shadow)"/>
+  <line x1="410" y1="150" x2="440" y2="150" stroke="#e94560" stroke-width="2"/>
+  <text x="80" y="146" font-family="Segoe UI, Arial, sans-serif" font-size="15" font-weight="700" fill="#e94560">Initial Release</text>
+  <text x="80" y="166" font-family="Segoe UI, Arial, sans-serif" font-size="11" fill="#94a3b8">Z-Image LoRA Merger — basic weighted sum merging</text>
+  <rect x="310" y="132" width="90" height="20" rx="10" fill="#e94560" opacity="0.15"/>
+  <text x="355" y="146" font-family="Segoe UI, Arial, sans-serif" font-size="10" fill="#e94560" text-anchor="middle" font-weight="600">v1.0.0</text>
+
+  <!-- === Milestone 2: LoRA Optimizer Node === -->
+  <circle cx="450" cy="260" r="10" fill="#e94560" filter="url(#glow)"/>
+  <circle cx="450" cy="260" r="4" fill="#fff"/>
+  <!-- Card RIGHT -->
+  <rect x="490" y="224" width="350" height="72" rx="10" fill="#1e293b" stroke="#334155" stroke-width="1" filter="url(#shadow)"/>
+  <line x1="460" y1="260" x2="490" y2="260" stroke="#e94560" stroke-width="2"/>
+  <text x="510" y="248" font-family="Segoe UI, Arial, sans-serif" font-size="15" font-weight="700" fill="#f59e0b">LoRA Optimizer Node</text>
+  <text x="510" y="268" font-family="Segoe UI, Arial, sans-serif" font-size="11" fill="#94a3b8">Automatic TIES merging with sign conflict analysis,</text>
+  <text x="510" y="283" font-family="Segoe UI, Arial, sans-serif" font-size="11" fill="#94a3b8">auto-strength reduction, and analysis report output</text>
+
+  <!-- === Milestone 3: GPU Acceleration === -->
+  <circle cx="450" cy="370" r="10" fill="#c026d3" filter="url(#glow)"/>
+  <circle cx="450" cy="370" r="4" fill="#fff"/>
+  <!-- Card LEFT -->
+  <rect x="60" y="338" width="350" height="64" rx="10" fill="#1e293b" stroke="#334155" stroke-width="1" filter="url(#shadow)"/>
+  <line x1="410" y1="370" x2="440" y2="370" stroke="#c026d3" stroke-width="2"/>
+  <text x="80" y="362" font-family="Segoe UI, Arial, sans-serif" font-size="15" font-weight="700" fill="#c026d3">GPU Acceleration</text>
+  <text x="80" y="382" font-family="Segoe UI, Arial, sans-serif" font-size="11" fill="#94a3b8">CUDA-accelerated analysis and merge phases with</text>
+  <text x="80" y="396" font-family="Segoe UI, Arial, sans-serif" font-size="11" fill="#94a3b8">thread-pool parallelization for multi-core CPUs</text>
+  <rect x="310" y="348" width="90" height="20" rx="10" fill="#c026d3" opacity="0.15"/>
+  <text x="355" y="362" font-family="Segoe UI, Arial, sans-serif" font-size="10" fill="#c026d3" text-anchor="middle" font-weight="600">PERF</text>
+
+  <!-- === Milestone 4: Two-Pass Streaming === -->
+  <circle cx="450" cy="480" r="10" fill="#c026d3" filter="url(#glow)"/>
+  <circle cx="450" cy="480" r="4" fill="#fff"/>
+  <!-- Card RIGHT -->
+  <rect x="490" y="444" width="350" height="72" rx="10" fill="#1e293b" stroke="#334155" stroke-width="1" filter="url(#shadow)"/>
+  <line x1="460" y1="480" x2="490" y2="480" stroke="#c026d3" stroke-width="2"/>
+  <text x="510" y="468" font-family="Segoe UI, Arial, sans-serif" font-size="15" font-weight="700" fill="#c026d3">Two-Pass Streaming</text>
+  <text x="510" y="488" font-family="Segoe UI, Arial, sans-serif" font-size="11" fill="#94a3b8">Memory-efficient architecture: ~50 GB peak reduced</text>
+  <text x="510" y="503" font-family="Segoe UI, Arial, sans-serif" font-size="11" fill="#94a3b8">to ~260 MB. Enables merging on consumer hardware</text>
+  <rect x="740" y="454" width="90" height="20" rx="10" fill="#c026d3" opacity="0.15"/>
+  <text x="785" y="468" font-family="Segoe UI, Arial, sans-serif" font-size="10" fill="#c026d3" text-anchor="middle" font-weight="600">PERF</text>
+
+  <!-- === Milestone 5: Per-Prefix Adaptive Merge === -->
+  <circle cx="450" cy="590" r="10" fill="#a78bfa" filter="url(#glow)"/>
+  <circle cx="450" cy="590" r="4" fill="#fff"/>
+  <!-- Card LEFT -->
+  <rect x="60" y="554" width="350" height="72" rx="10" fill="#1e293b" stroke="#334155" stroke-width="1" filter="url(#shadow)"/>
+  <line x1="410" y1="590" x2="440" y2="590" stroke="#a78bfa" stroke-width="2"/>
+  <text x="80" y="578" font-family="Segoe UI, Arial, sans-serif" font-size="15" font-weight="700" fill="#a78bfa">Per-Prefix Adaptive Merge</text>
+  <text x="80" y="598" font-family="Segoe UI, Arial, sans-serif" font-size="11" fill="#94a3b8">Each weight prefix analyzed independently: TIES for</text>
+  <text x="80" y="612" font-family="Segoe UI, Arial, sans-serif" font-size="11" fill="#94a3b8">high-conflict layers, weighted sum for clean ones</text>
+  <rect x="310" y="564" width="90" height="20" rx="10" fill="#a78bfa" opacity="0.15"/>
+  <text x="355" y="578" font-family="Segoe UI, Arial, sans-serif" font-size="10" fill="#a78bfa" text-anchor="middle" font-weight="600">STRATEGY</text>
+
+  <!-- === Milestone 6: SVD Compression === -->
+  <circle cx="450" cy="700" r="10" fill="#22c55e" filter="url(#glow)"/>
+  <circle cx="450" cy="700" r="4" fill="#fff"/>
+  <!-- Card RIGHT -->
+  <rect x="490" y="664" width="350" height="72" rx="10" fill="#1e293b" stroke="#334155" stroke-width="1" filter="url(#shadow)"/>
+  <line x1="460" y1="700" x2="490" y2="700" stroke="#22c55e" stroke-width="2"/>
+  <text x="510" y="688" font-family="Segoe UI, Arial, sans-serif" font-size="15" font-weight="700" fill="#22c55e">SVD Patch Compression</text>
+  <text x="510" y="708" font-family="Segoe UI, Arial, sans-serif" font-size="11" fill="#94a3b8">Post-merge low-rank re-compression via SVD. Up to</text>
+  <text x="510" y="723" font-family="Segoe UI, Arial, sans-serif" font-size="11" fill="#94a3b8">128x RAM savings for single-LoRA pass-through layers</text>
+  <rect x="740" y="674" width="90" height="20" rx="10" fill="#22c55e" opacity="0.15"/>
+  <text x="785" y="688" font-family="Segoe UI, Arial, sans-serif" font-size="10" fill="#22c55e" text-anchor="middle" font-weight="600">OPTIMIZE</text>
+
+  <!-- === Milestone 7: SLERP === -->
+  <circle cx="450" cy="810" r="10" fill="#a78bfa" filter="url(#glow)"/>
+  <circle cx="450" cy="810" r="4" fill="#fff"/>
+  <!-- Card LEFT -->
+  <rect x="60" y="778" width="350" height="64" rx="10" fill="#1e293b" stroke="#334155" stroke-width="1" filter="url(#shadow)"/>
+  <line x1="410" y1="810" x2="440" y2="810" stroke="#a78bfa" stroke-width="2"/>
+  <text x="80" y="802" font-family="Segoe UI, Arial, sans-serif" font-size="15" font-weight="700" fill="#a78bfa">SLERP Merge</text>
+  <text x="80" y="822" font-family="Segoe UI, Arial, sans-serif" font-size="11" fill="#94a3b8">Spherical linear interpolation for 2-LoRA low-conflict</text>
+  <text x="80" y="836" font-family="Segoe UI, Arial, sans-serif" font-size="11" fill="#94a3b8">prefixes. Preserves vector magnitude during blending</text>
+  <rect x="310" y="788" width="90" height="20" rx="10" fill="#a78bfa" opacity="0.15"/>
+  <text x="355" y="802" font-family="Segoe UI, Arial, sans-serif" font-size="10" fill="#a78bfa" text-anchor="middle" font-weight="600">STRATEGY</text>
+
+  <!-- === Milestone 8: Architecture-Aware Key Normalization === -->
+  <circle cx="450" cy="920" r="10" fill="#64ffda" filter="url(#glow)"/>
+  <circle cx="450" cy="920" r="4" fill="#fff"/>
+  <!-- Card RIGHT -->
+  <rect x="490" y="876" width="350" height="88" rx="10" fill="#1e293b" stroke="#334155" stroke-width="1" filter="url(#shadow)"/>
+  <line x1="460" y1="920" x2="490" y2="920" stroke="#64ffda" stroke-width="2"/>
+  <text x="510" y="900" font-family="Segoe UI, Arial, sans-serif" font-size="15" font-weight="700" fill="#64ffda">Architecture-Aware Normalization</text>
+  <text x="510" y="920" font-family="Segoe UI, Arial, sans-serif" font-size="11" fill="#94a3b8">Cross-trainer LoRA compatibility. Auto-detects FLUX,</text>
+  <text x="510" y="935" font-family="Segoe UI, Arial, sans-serif" font-size="11" fill="#94a3b8">Wan, SDXL, LTX, Z-Image architectures and remaps</text>
+  <text x="510" y="950" font-family="Segoe UI, Arial, sans-serif" font-size="11" fill="#94a3b8">keys so LoRAs from different trainers can merge</text>
+  <rect x="740" y="886" width="90" height="20" rx="10" fill="#64ffda" opacity="0.15"/>
+  <text x="785" y="900" font-family="Segoe UI, Arial, sans-serif" font-size="10" fill="#64ffda" text-anchor="middle" font-weight="600">COMPAT</text>
+
+  <!-- === Milestone 9: DARE / DELLA Sparsification === -->
+  <circle cx="450" cy="1040" r="10" fill="#f59e0b" filter="url(#glow)"/>
+  <circle cx="450" cy="1040" r="4" fill="#fff"/>
+  <!-- Card LEFT -->
+  <rect x="60" y="1004" width="350" height="72" rx="10" fill="#1e293b" stroke="#334155" stroke-width="1" filter="url(#shadow)"/>
+  <line x1="410" y1="1040" x2="440" y2="1040" stroke="#f59e0b" stroke-width="2"/>
+  <text x="80" y="1028" font-family="Segoe UI, Arial, sans-serif" font-size="15" font-weight="700" fill="#f59e0b">DARE / DELLA Sparsification</text>
+  <text x="80" y="1048" font-family="Segoe UI, Arial, sans-serif" font-size="11" fill="#94a3b8">Random weight dropout before merge to reduce inter-</text>
+  <text x="80" y="1062" font-family="Segoe UI, Arial, sans-serif" font-size="11" fill="#94a3b8">ference. Conflict-aware variant targets high-conflict areas</text>
+  <rect x="310" y="1014" width="90" height="20" rx="10" fill="#f59e0b" opacity="0.15"/>
+  <text x="355" y="1028" font-family="Segoe UI, Arial, sans-serif" font-size="10" fill="#f59e0b" text-anchor="middle" font-weight="600">PREPROCESS</text>
+
+  <!-- === Milestone 10: Save Merged LoRA === -->
+  <circle cx="450" cy="1150" r="10" fill="#22c55e" filter="url(#glow)"/>
+  <circle cx="450" cy="1150" r="4" fill="#fff"/>
+  <!-- Card RIGHT -->
+  <rect x="490" y="1118" width="350" height="64" rx="10" fill="#1e293b" stroke="#334155" stroke-width="1" filter="url(#shadow)"/>
+  <line x1="460" y1="1150" x2="490" y2="1150" stroke="#22c55e" stroke-width="2"/>
+  <text x="510" y="1142" font-family="Segoe UI, Arial, sans-serif" font-size="15" font-weight="700" fill="#22c55e">Save Merged LoRA</text>
+  <text x="510" y="1162" font-family="Segoe UI, Arial, sans-serif" font-size="11" fill="#94a3b8">Export merged result as standalone .safetensors file.</text>
+  <text x="510" y="1176" font-family="Segoe UI, Arial, sans-serif" font-size="11" fill="#94a3b8">Works with any standard LoRA loader</text>
+  <rect x="740" y="1128" width="90" height="20" rx="10" fill="#22c55e" opacity="0.15"/>
+  <text x="785" y="1142" font-family="Segoe UI, Arial, sans-serif" font-size="10" fill="#22c55e" text-anchor="middle" font-weight="600">OUTPUT</text>
+
+  <!-- === Milestone 11: Dynamic LoRA Stacker === -->
+  <circle cx="450" cy="1260" r="10" fill="#38bdf8" filter="url(#glow)"/>
+  <circle cx="450" cy="1260" r="4" fill="#fff"/>
+  <!-- Card LEFT -->
+  <rect x="60" y="1224" width="350" height="72" rx="10" fill="#1e293b" stroke="#334155" stroke-width="1" filter="url(#shadow)"/>
+  <line x1="410" y1="1260" x2="440" y2="1260" stroke="#38bdf8" stroke-width="2"/>
+  <text x="80" y="1248" font-family="Segoe UI, Arial, sans-serif" font-size="15" font-weight="700" fill="#38bdf8">Dynamic LoRA Stacker</text>
+  <text x="80" y="1268" font-family="Segoe UI, Arial, sans-serif" font-size="11" fill="#94a3b8">Adjustable 1-10 slot count in a single node. Simple</text>
+  <text x="80" y="1282" font-family="Segoe UI, Arial, sans-serif" font-size="11" fill="#94a3b8">mode or advanced per-LoRA model + CLIP strengths</text>
+  <rect x="310" y="1234" width="90" height="20" rx="10" fill="#38bdf8" opacity="0.15"/>
+  <text x="355" y="1248" font-family="Segoe UI, Arial, sans-serif" font-size="10" fill="#38bdf8" text-anchor="middle" font-weight="600">NODE</text>
+
+  <!-- === Milestone 12: Interference-Aware Auto-Strength === -->
+  <circle cx="450" cy="1370" r="10" fill="#e94560" filter="url(#glow)"/>
+  <circle cx="450" cy="1370" r="4" fill="#fff"/>
+  <!-- Card RIGHT -->
+  <rect x="490" y="1326" width="350" height="88" rx="10" fill="#1e293b" stroke="#334155" stroke-width="1" filter="url(#shadow)"/>
+  <line x1="460" y1="1370" x2="490" y2="1370" stroke="#e94560" stroke-width="2"/>
+  <text x="510" y="1350" font-family="Segoe UI, Arial, sans-serif" font-size="15" font-weight="700" fill="#e94560">Interference-Aware Auto-Strength</text>
+  <text x="510" y="1370" font-family="Segoe UI, Arial, sans-serif" font-size="11" fill="#94a3b8">Pairwise cosine similarity measures directional align-</text>
+  <text x="510" y="1385" font-family="Segoe UI, Arial, sans-serif" font-size="11" fill="#94a3b8">ment between LoRAs. Exact vector-sum energy formula</text>
+  <text x="510" y="1400" font-family="Segoe UI, Arial, sans-serif" font-size="11" fill="#94a3b8">scales strengths based on reinforcement vs cancellation</text>
+  <rect x="740" y="1336" width="90" height="20" rx="10" fill="#e94560" opacity="0.15"/>
+  <text x="785" y="1350" font-family="Segoe UI, Arial, sans-serif" font-size="10" fill="#e94560" text-anchor="middle" font-weight="600">ANALYSIS</text>
+
+  <!-- End dot -->
+  <circle cx="450" cy="1470" r="6" fill="#a78bfa" opacity="0.6"/>
+  <circle cx="450" cy="1470" r="3" fill="#fff" opacity="0.8"/>
+
+  <!-- Legend -->
+  <rect x="240" y="1480" width="420" height="24" rx="12" fill="#0f172a" stroke="#334155" stroke-width="1"/>
+  <circle cx="280" cy="1492" r="5" fill="#e94560"/>
+  <text x="290" y="1496" font-family="Segoe UI, Arial, sans-serif" font-size="9" fill="#94a3b8">Feature</text>
+  <circle cx="340" cy="1492" r="5" fill="#c026d3"/>
+  <text x="350" y="1496" font-family="Segoe UI, Arial, sans-serif" font-size="9" fill="#94a3b8">Performance</text>
+  <circle cx="420" cy="1492" r="5" fill="#a78bfa"/>
+  <text x="430" y="1496" font-family="Segoe UI, Arial, sans-serif" font-size="9" fill="#94a3b8">Strategy</text>
+  <circle cx="490" cy="1492" r="5" fill="#22c55e"/>
+  <text x="500" y="1496" font-family="Segoe UI, Arial, sans-serif" font-size="9" fill="#94a3b8">Optimize</text>
+  <circle cx="560" cy="1492" r="5" fill="#64ffda"/>
+  <text x="570" y="1496" font-family="Segoe UI, Arial, sans-serif" font-size="9" fill="#94a3b8">Compat</text>
+  <circle cx="620" cy="1492" r="5" fill="#38bdf8"/>
+  <text x="630" y="1496" font-family="Segoe UI, Arial, sans-serif" font-size="9" fill="#94a3b8">Node</text>
+</svg>
