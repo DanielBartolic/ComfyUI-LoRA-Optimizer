@@ -18,6 +18,7 @@ import comfy.utils
 import comfy.sd
 import comfy.lora
 from comfy.weight_adapter.lora import LoRAAdapter
+from safetensors.torch import save_file
 
 
 class LoRAStack:
@@ -61,6 +62,70 @@ class LoRAStack:
         })
         
         return (lora_list,)
+
+
+class LoRAStackDynamic:
+    """
+    Dynamic LoRA stacker — single node with adjustable slot count.
+    Simple mode: one strength per LoRA (applies to both model and CLIP).
+    Advanced mode: separate model_strength and clip_strength per LoRA.
+    Outputs standard (name, model_str, clip_str) tuples.
+    """
+
+    modes = ["simple", "advanced"]
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        loras = ["None"] + folder_paths.get_filename_list("loras")
+        inputs = {
+            "required": {
+                "input_mode": (cls.modes, {"tooltip": "Simple: one strength per LoRA. Advanced: separate model and CLIP strengths."}),
+                "lora_count": ("INT", {"default": 3, "min": 1, "max": 10, "step": 1,
+                                       "tooltip": "Number of LoRA slots to show"}),
+            }
+        }
+        for i in range(1, 11):
+            inputs["required"][f"lora_name_{i}"] = (loras,)
+            inputs["required"][f"lora_wt_{i}"] = ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.05})
+            inputs["required"][f"model_str_{i}"] = ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.05})
+            inputs["required"][f"clip_str_{i}"] = ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.05})
+        inputs["optional"] = {
+            "lora_stack": ("LORA_STACK", {"tooltip": "Optional stack from another stacker to extend"}),
+        }
+        return inputs
+
+    RETURN_TYPES = ("LORA_STACK",)
+    RETURN_NAMES = ("lora_stack",)
+    FUNCTION = "build_stack"
+    CATEGORY = "loaders/lora"
+    DESCRIPTION = "Dynamic LoRA stacker with adjustable slot count and optional per-LoRA CLIP strength"
+
+    def build_stack(self, input_mode, lora_count, lora_stack=None, **kwargs):
+        loras = []
+        for i in range(1, lora_count + 1):
+            name = kwargs.get(f"lora_name_{i}", "None")
+            if name == "None":
+                continue
+            if input_mode == "simple":
+                wt = kwargs.get(f"lora_wt_{i}", 1.0)
+                loras.append((name, wt, wt))
+            else:
+                model_str = kwargs.get(f"model_str_{i}", 1.0)
+                clip_str = kwargs.get(f"clip_str_{i}", 1.0)
+                loras.append((name, model_str, clip_str))
+        if lora_stack is not None:
+            for l in lora_stack:
+                if isinstance(l, dict):
+                    # Convert LoRAStack dict format to tuple so the list stays homogeneous
+                    if l.get("name", "None") != "None":
+                        s = l.get("strength", 1.0)
+                        loras.append((l["name"], s, s))
+                elif isinstance(l, (tuple, list)):
+                    if l[0] != "None":
+                        loras.append(tuple(l))
+                else:
+                    loras.append(l)
+        return (loras,)
 
 
 class _LoRAMergeBase:
@@ -825,6 +890,45 @@ class _LoRAMergeBase:
         return (flat * mask).reshape(tensor.shape)
 
     @staticmethod
+    def _dare_sparsify(tensor, density, generator=None):
+        """
+        DARE sparsification: randomly drop parameters and rescale survivors.
+        Each element is kept with probability `density`, then rescaled by 1/density.
+        """
+        if density >= 1.0:
+            return tensor
+        # Generate mask on CPU (where the deterministic generator lives), then move to device
+        mask = torch.bernoulli(
+            torch.full(tensor.shape, density, dtype=tensor.dtype),
+            generator=generator
+        ).to(device=tensor.device, dtype=tensor.dtype)
+        return tensor * mask * (1.0 / density)
+
+    @staticmethod
+    def _della_sparsify(tensor, density, epsilon=0.3, generator=None):
+        """
+        DELLA sparsification: magnitude-aware dropout.
+        Low-magnitude elements are dropped with higher probability.
+        Survivors are rescaled by 1/(1-p_i) to preserve expected value.
+        """
+        if density >= 1.0:
+            return tensor
+        original_shape = tensor.shape
+        mat = tensor.unsqueeze(0) if tensor.dim() < 2 else tensor.reshape(tensor.shape[0], -1)
+        nrows, ncols = mat.shape
+        p_min = max((1.0 - density) - epsilon / 2.0, 0.0)
+        # Double-argsort gives ascending magnitude ranks; invert so low-magnitude
+        # elements get HIGH drop probability (rank 0 = highest magnitude → p_min)
+        asc_ranks = mat.abs().argsort(dim=1).argsort(dim=1).float()
+        ranks = (ncols - 1) - asc_ranks
+        drop_probs = (p_min + (epsilon / ncols) * ranks).clamp(0.0, 1.0)
+        keep_probs = 1.0 - drop_probs
+        # Generate mask on CPU (where the deterministic generator lives), then move to device
+        mask = torch.bernoulli(keep_probs.cpu(), generator=generator).to(device=mat.device)
+        rescale = torch.where(mask > 0, 1.0 / keep_probs.clamp(min=1e-6), torch.zeros_like(keep_probs))
+        return (mat * mask * rescale).reshape(original_shape)
+
+    @staticmethod
     def _ties_elect_sign(trimmed_diffs, method="frequency"):
         """
         TIES Step 2: Elect Sign — determine majority sign direction per weight position.
@@ -914,7 +1018,8 @@ class _LoRAMergeBase:
 
     @torch.no_grad()
     def _merge_diffs(self, diffs_with_weights, mode, density=0.5, majority_sign_method="frequency",
-                     compute_device=None):
+                     compute_device=None, sparsification="disabled",
+                     sparsification_density=0.7, sparsification_generator=None):
         """
         Merges a list of diffs with their weights.
         When compute_device is given, tensors are moved there for faster ops,
@@ -935,6 +1040,16 @@ class _LoRAMergeBase:
         dtype = ref_diff.dtype
         dev = compute_device if compute_device is not None else ref_diff.device
         to_cpu = compute_device is not None and compute_device.type != "cpu"
+
+        # DARE/DELLA preprocessing for non-TIES modes
+        # (TIES replaces its trim step instead — handled in the ties branch)
+        if sparsification != "disabled" and mode != "ties":
+            sparsify_fn = self._dare_sparsify if sparsification == "dare" else self._della_sparsify
+            for idx in range(len(diffs_with_weights)):
+                diff, weight = diffs_with_weights[idx]
+                diff = diff.to(device=dev, dtype=torch.float32)
+                diff = sparsify_fn(diff, sparsification_density, generator=sparsification_generator)
+                diffs_with_weights[idx] = (diff.to(dtype), weight)
 
         if mode == "weighted_average":
             result = torch.zeros(ref_diff.shape, dtype=torch.float32, device=dev)
@@ -1047,7 +1162,13 @@ class _LoRAMergeBase:
                 del d
                 if w < 0:
                     d_f = -d_f
-                trimmed.append(self._ties_trim(d_f, density))
+                # DARE/DELLA replaces TIES trim step when enabled
+                if sparsification == "dare":
+                    trimmed.append(self._dare_sparsify(d_f, sparsification_density, generator=sparsification_generator))
+                elif sparsification == "della":
+                    trimmed.append(self._della_sparsify(d_f, sparsification_density, generator=sparsification_generator))
+                else:
+                    trimmed.append(self._ties_trim(d_f, density))
                 abs_weights.append(abs(w))
 
             # Step 2: Elect majority sign
@@ -1221,17 +1342,28 @@ class LoRAOptimizer(_LoRAMergeBase):
                     "default": "disabled",
                     "tooltip": "Auto-detect LoRA architecture and normalize keys before merging. Enable when mixing LoRAs from different trainers (e.g., Kohya + AI-Toolkit) or for Z-Image QKV fusion."
                 }),
+                "sparsification": (["disabled", "dare", "della"], {
+                    "default": "disabled",
+                    "tooltip": "Sparsify each LoRA diff before merging to reduce interference. "
+                               "DARE: random dropout. DELLA: magnitude-aware dropout. "
+                               "For TIES mode, replaces the trim step."
+                }),
+                "sparsification_density": ("FLOAT", {
+                    "default": 0.7, "min": 0.01, "max": 1.0, "step": 0.05,
+                    "tooltip": "Fraction of parameters to keep. Lower = more aggressive. "
+                               "Only used when sparsification is enabled."
+                }),
             }
         }
 
-    RETURN_TYPES = ("MODEL", "CLIP", "STRING")
-    RETURN_NAMES = ("model", "clip", "analysis_report")
+    RETURN_TYPES = ("MODEL", "CLIP", "STRING", "LORA_DATA")
+    RETURN_NAMES = ("model", "clip", "analysis_report", "lora_data")
     FUNCTION = "optimize_merge"
     CATEGORY = "loaders/lora"
     DESCRIPTION = "Auto-analyzes LoRA stack and selects optimal merge strategy per weight group. Outputs merged model + analysis report."
 
     @staticmethod
-    def _compute_cache_key(lora_stack, output_strength, clip_strength_multiplier, auto_strength, optimization_mode="per_prefix", compress_patches="non_ties", svd_device="gpu", normalize_keys="disabled"):
+    def _compute_cache_key(lora_stack, output_strength, clip_strength_multiplier, auto_strength, optimization_mode="per_prefix", compress_patches="non_ties", svd_device="gpu", normalize_keys="disabled", sparsification="disabled", sparsification_density=0.7):
         """
         Build a deterministic SHA-256 hash (16 hex chars) from the stack
         configuration. Used by IS_CHANGED to let ComfyUI skip re-execution
@@ -1249,7 +1381,7 @@ class LoRAOptimizer(_LoRAMergeBase):
                     entries.append((str(item.get("name", "")), float(item.get("strength", 0))))
             entries.sort()
             h.update(json.dumps(entries).encode())
-        h.update(f"|os={output_strength}|csm={clip_strength_multiplier}|as={auto_strength}|om={optimization_mode}|cp={compress_patches}|sd={svd_device}|nk={normalize_keys}".encode())
+        h.update(f"|os={output_strength}|csm={clip_strength_multiplier}|as={auto_strength}|om={optimization_mode}|cp={compress_patches}|sd={svd_device}|nk={normalize_keys}|sp={sparsification}|spd={sparsification_density}".encode())
         return h.hexdigest()[:16]
 
     @classmethod
@@ -1257,11 +1389,13 @@ class LoRAOptimizer(_LoRAMergeBase):
                    clip_strength_multiplier=1.0, auto_strength="disabled",
                    free_vram_between_passes="disabled", optimization_mode="per_prefix",
                    cache_patches="enabled", compress_patches="non_ties",
-                   svd_device="gpu", normalize_keys="disabled"):
+                   svd_device="gpu", normalize_keys="disabled",
+                   sparsification="disabled", sparsification_density=0.7):
         return cls._compute_cache_key(lora_stack, output_strength,
                                       clip_strength_multiplier, auto_strength,
                                       optimization_mode, compress_patches,
-                                      svd_device, normalize_keys)
+                                      svd_device, normalize_keys,
+                                      sparsification, sparsification_density)
 
     def _save_report_to_disk(self, cache_key, lora_combo, auto_strength, report, selected_params):
         """
@@ -1769,7 +1903,8 @@ class LoRAOptimizer(_LoRAMergeBase):
     def _build_report(self, lora_stats, pairwise_conflicts, collection_stats,
                       mode, density, sign_method, reasoning, merge_summary,
                       auto_strength_info=None, strategy_counts=None, optimization_mode="global",
-                      prefix_decisions=None, detected_arch=None, normalize_keys="disabled"):
+                      prefix_decisions=None, detected_arch=None, normalize_keys="disabled",
+                      sparsification="disabled", sparsification_density=0.7):
         """Format analysis as a multi-line report string."""
         lines = []
         lines.append("=" * 50)
@@ -1845,6 +1980,17 @@ class LoRAOptimizer(_LoRAMergeBase):
             lines.append(f"  Sign method: {sign_method}")
         if optimization_mode == "per_prefix":
             lines.append("  (global fallback — each prefix uses its own parameters)")
+        if sparsification != "disabled":
+            lines.append(f"  Sparsification: {sparsification.upper()}")
+            lines.append(f"  Sparsification density: {sparsification_density:.2f} (keep rate)")
+            if optimization_mode == "per_prefix":
+                lines.append(f"  For TIES prefixes: replaces trim step; others: preprocessing")
+            elif optimization_mode == "weighted_sum_only":
+                lines.append(f"  Applied as preprocessing before weighted_sum")
+            elif mode == "ties":
+                lines.append(f"  Note: {sparsification.upper()} replaces TIES trim step")
+            else:
+                lines.append(f"  Applied as preprocessing before {mode}")
 
         # Per-Prefix Strategy breakdown (only in per_prefix mode)
         if optimization_mode == "per_prefix" and strategy_counts:
@@ -1941,7 +2087,7 @@ class LoRAOptimizer(_LoRAMergeBase):
         lines.append("=" * 50)
         return "\n".join(lines)
 
-    def optimize_merge(self, model, lora_stack, output_strength, clip=None, clip_strength_multiplier=1.0, auto_strength="disabled", free_vram_between_passes="disabled", optimization_mode="per_prefix", cache_patches="enabled", compress_patches="non_ties", svd_device="gpu", normalize_keys="disabled"):
+    def optimize_merge(self, model, lora_stack, output_strength, clip=None, clip_strength_multiplier=1.0, auto_strength="disabled", free_vram_between_passes="disabled", optimization_mode="per_prefix", cache_patches="enabled", compress_patches="non_ties", svd_device="gpu", normalize_keys="disabled", sparsification="disabled", sparsification_density=0.7):
         """
         Main entry point. Two-pass streaming architecture:
         Pass 1: Compute diffs per-prefix, sample conflicts + magnitudes, discard diffs
@@ -1994,9 +2140,10 @@ class LoRAOptimizer(_LoRAMergeBase):
         cache_key = self._compute_cache_key(lora_stack, output_strength,
                                             clip_strength_multiplier, auto_strength,
                                             optimization_mode, compress_patches,
-                                            svd_device, normalize_keys)
+                                            svd_device, normalize_keys,
+                                            sparsification, sparsification_density)
         if cache_patches == "enabled" and cache_key in self._merge_cache:
-            model_patches, clip_patches, report, clip_strength_out = self._merge_cache[cache_key]
+            model_patches, clip_patches, report, clip_strength_out, lora_data = self._merge_cache[cache_key]
             new_model = model
             new_clip = clip
             if model is not None and len(model_patches) > 0:
@@ -2006,7 +2153,7 @@ class LoRAOptimizer(_LoRAMergeBase):
                 new_clip = clip.clone()
                 new_clip.add_patches(clip_patches, clip_strength_out)
             logging.info(f"[LoRA Optimizer] Using cached merge result ({len(model_patches)} model + {len(clip_patches)} CLIP patches)")
-            return (new_model, new_clip, report)
+            return (new_model, new_clip, report, lora_data)
 
         logging.info(f"[LoRA Optimizer] Starting analysis of {len(active_loras)} LoRAs")
         t_start = time.time()
@@ -2391,10 +2538,20 @@ class LoRAOptimizer(_LoRAMergeBase):
             elif len(diffs_list) <= 1 and pf_mode != "weighted_sum":
                 pf_mode = "weighted_sum"
 
+            # Create deterministic per-prefix RNG for reproducible sparsification
+            sp_gen = None
+            if sparsification != "disabled":
+                seed = int(hashlib.sha256(lora_prefix.encode()).hexdigest(), 16) % (2**63)
+                sp_gen = torch.Generator(device='cpu')
+                sp_gen.manual_seed(seed)
+
             merged_diff = self._merge_diffs(
                 diffs_list, pf_mode,
                 density=pf_density, majority_sign_method=pf_sign,
-                compute_device=compute_device
+                compute_device=compute_device,
+                sparsification=sparsification,
+                sparsification_density=sparsification_density,
+                sparsification_generator=sp_gen
             )
             diffs_list.clear()  # Free input diffs from GPU
             if merged_diff is None:
@@ -2475,6 +2632,13 @@ class LoRAOptimizer(_LoRAMergeBase):
                 model_patches = self._refuse_zimage_patches(model_patches)
                 logging.info(f"[LoRA Optimizer] Re-fused Z-Image QKV patches ({len(model_patches)} model patches)")
 
+        # Build reverse key map: target_key → lora_prefix
+        # (used by SaveMergedLoRA to reconstruct standard LoRA key names)
+        reverse_key_map = {}
+        for lora_prefix, (target_key, is_clip) in all_key_targets.items():
+            tkey = target_key[0] if isinstance(target_key, tuple) else target_key
+            reverse_key_map[tkey] = lora_prefix
+
         # Apply patches
         new_model = model
         new_clip = clip
@@ -2514,11 +2678,22 @@ class LoRAOptimizer(_LoRAMergeBase):
             prefix_decisions=prefix_decisions if optimization_mode == "per_prefix" else None,
             detected_arch=getattr(self, '_detected_arch', None),
             normalize_keys=normalize_keys,
+            sparsification=sparsification,
+            sparsification_density=sparsification_density,
         )
+
+        # Bundle LORA_DATA for optional downstream saving
+        lora_data = {
+            "model_patches": model_patches,
+            "clip_patches": clip_patches,
+            "key_map": reverse_key_map,
+            "output_strength": output_strength,
+            "clip_strength": clip_strength_out,
+        }
 
         # Cache patches for re-use (single entry to limit memory)
         if cache_patches == "enabled":
-            self._merge_cache = {cache_key: (model_patches, clip_patches, report, clip_strength_out)}
+            self._merge_cache = {cache_key: (model_patches, clip_patches, report, clip_strength_out, lora_data)}
         else:
             self._merge_cache = {}
             logging.info("[LoRA Optimizer] Patch cache disabled — RAM freed after merge")
@@ -2534,16 +2709,98 @@ class LoRAOptimizer(_LoRAMergeBase):
 
         logging.info(f"[LoRA Optimizer] Done! {processed_keys} keys processed ({time.time() - t_start:.1f}s total)")
 
-        return (new_model, new_clip, report)
+        return (new_model, new_clip, report, lora_data)
+
+
+class SaveMergedLoRA:
+    """
+    Saves merged LoRA patches from LoRA Optimizer as a standalone .safetensors
+    file that can be loaded by any standard LoRA loader.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "lora_data": ("LORA_DATA", {"tooltip": "Merged LoRA data from LoRA Optimizer"}),
+                "filename": ("STRING", {"default": "merged_lora", "tooltip": "Base filename (without extension)"}),
+                "save_rank": ("INT", {
+                    "default": 128, "min": 4, "max": 1024, "step": 4,
+                    "tooltip": "SVD rank for compressing full-rank diff patches. "
+                               "Higher = more faithful, larger file."
+                }),
+                "bake_strength": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "Multiply output/clip strength into saved weights so "
+                               "loading at strength 1.0 reproduces the exact merge."
+                }),
+            }
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("file_path",)
+    FUNCTION = "save_lora"
+    CATEGORY = "loaders/lora"
+    OUTPUT_NODE = True
+    DESCRIPTION = "Saves merged LoRA data as a standalone .safetensors file that can be loaded by any standard LoRA loader."
+
+    def save_lora(self, lora_data, filename, save_rank=128, bake_strength=True):
+        # Determine save path
+        output_dir = folder_paths.get_output_directory()
+        save_dir = os.path.join(output_dir, "loras_merged")
+        os.makedirs(save_dir, exist_ok=True)
+        save_path = os.path.join(save_dir, f"{filename}.safetensors")
+
+        model_patches = lora_data["model_patches"]
+        clip_patches = lora_data["clip_patches"]
+        key_map = lora_data["key_map"]
+        output_strength = lora_data["output_strength"]
+        clip_strength = lora_data["clip_strength"]
+
+        state_dict = {}
+
+        for target_key, patch in list(model_patches.items()) + list(clip_patches.items()):
+            is_clip = target_key in clip_patches
+            tkey = target_key[0] if isinstance(target_key, tuple) else target_key
+            lora_prefix = key_map.get(tkey, tkey)
+
+            if isinstance(patch, LoRAAdapter):
+                mat_up, mat_down, alpha, mid, _, _ = patch.weights
+                alpha = float(alpha) if alpha is not None else float(mat_down.shape[0])
+            elif isinstance(patch, tuple) and len(patch) == 2 and patch[0] == "diff":
+                diff_tensor = patch[1][0]
+                compressed = LoRAOptimizer._compress_to_lowrank(diff_tensor, save_rank)
+                mat_up, mat_down, alpha, mid, _, _ = compressed.weights
+                alpha = float(alpha)
+            else:
+                logging.warning(f"[Save Merged LoRA] Skipping unknown patch type for {lora_prefix}: {type(patch)}")
+                continue
+
+            if bake_strength:
+                strength = clip_strength if is_clip else output_strength
+                alpha *= strength
+
+            state_dict[f"{lora_prefix}.lora_up.weight"] = mat_up.contiguous()
+            state_dict[f"{lora_prefix}.lora_down.weight"] = mat_down.contiguous()
+            state_dict[f"{lora_prefix}.alpha"] = torch.tensor(alpha)
+
+        save_file(state_dict, save_path)
+        logging.info(f"[Save Merged LoRA] Saved {len(state_dict) // 3} LoRA keys to {save_path}")
+
+        return (save_path,)
 
 
 # Node registration
 NODE_CLASS_MAPPINGS = {
     "LoRAStack": LoRAStack,
+    "LoRAStackDynamic": LoRAStackDynamic,
     "LoRAOptimizer": LoRAOptimizer,
+    "SaveMergedLoRA": SaveMergedLoRA,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "LoRAStack": "LoRA Stack",
+    "LoRAStackDynamic": "LoRA Stack (Dynamic)",
     "LoRAOptimizer": "LoRA Optimizer",
+    "SaveMergedLoRA": "Save Merged LoRA",
 }
