@@ -1479,7 +1479,48 @@ class LoRAOptimizer(_LoRAMergeBase):
             except (AttributeError, RuntimeError, IndexError):
                 return None
 
-            # Compute diffs on GPU (inline to avoid GPU→CPU→GPU bounce)
+            # Determine strategy BEFORE computing diffs (use Pass 1 stats)
+            pf_conflict = 0.0
+            pf_n_loras = 0
+            pf_mode = mode
+            pf_density = density
+            pf_sign = sign_method
+            if optimization_mode == "per_prefix" and lora_prefix in prefix_stats:
+                pf = prefix_stats[lora_prefix]
+                pf_conflict = pf["conflict_ratio"]
+                pf_n_loras = pf["n_loras"]
+                if pf["n_loras"] <= 1:
+                    pf_mode = "weighted_sum"
+                    pf_density = 0.5
+                    pf_sign = "frequency"
+                else:
+                    pf_mode, pf_density, pf_sign, _ = self._auto_select_params(
+                        pf["conflict_ratio"], pf["magnitude_ratio"],
+                        magnitude_samples=pf.get("magnitude_samples")
+                    )
+
+            # LOW-RANK PATH: single-LoRA weighted_sum — keep low-rank matrices
+            # instead of expanding to full-rank diff. Saves ~128x memory per key.
+            # ComfyUI applies "lora" patches as: up @ down * (alpha/rank) * strength
+            if pf_mode == "weighted_sum" and pf_n_loras <= 1:
+                for i, item in enumerate(active_loras):
+                    lora_info = self._get_lora_key_info(item["lora"], lora_prefix)
+                    if lora_info is None:
+                        continue
+                    mat_up, mat_down, alpha, mid = lora_info
+                    if is_clip_key and item["clip_strength"] is not None:
+                        eff_strength = item["clip_strength"]
+                    else:
+                        eff_strength = item["strength"]
+                        if scale_ratios:
+                            eff_strength *= scale_ratios.get(i, 1.0)
+                    # Bake eff_strength into alpha so ComfyUI applies it correctly
+                    alpha_scaled = alpha * eff_strength
+                    patch = ("lora", (mat_up, mat_down, alpha_scaled, mid))
+                    return (target_key, is_clip_key, patch, pf_mode, lora_prefix, pf_conflict, max(pf_n_loras, 1))
+                return None
+
+            # FULL-RANK PATH: compute diffs on GPU, merge
             diffs_list = []
             for i, item in enumerate(active_loras):
                 lora_info = self._get_lora_key_info(item["lora"], lora_prefix)
@@ -1520,8 +1561,6 @@ class LoRAOptimizer(_LoRAMergeBase):
                 diff = diff * (alpha / rank)
 
                 if is_clip_key and item["clip_strength"] is not None:
-                    # Explicit clip_strength: don't apply model-derived
-                    # scale_ratios (auto-strength was computed from model L2s)
                     eff_strength = item["clip_strength"]
                 else:
                     eff_strength = item["strength"]
@@ -1533,27 +1572,11 @@ class LoRAOptimizer(_LoRAMergeBase):
             if len(diffs_list) == 0:
                 return None
 
-            # Determine strategy for this prefix
-            pf_conflict = 0.0
-            pf_n_loras = len(diffs_list)
-            if optimization_mode == "per_prefix" and lora_prefix in prefix_stats:
-                pf = prefix_stats[lora_prefix]
-                pf_conflict = pf["conflict_ratio"]
-                pf_n_loras = pf["n_loras"]
-                if pf["n_loras"] <= 1 or len(diffs_list) <= 1:
-                    # Single LoRA on this prefix: weighted_sum, full strength
-                    pf_mode = "weighted_sum"
-                    pf_density = 0.5
-                    pf_sign = "frequency"
-                else:
-                    pf_mode, pf_density, pf_sign, _ = self._auto_select_params(
-                        pf["conflict_ratio"], pf["magnitude_ratio"],
-                        magnitude_samples=pf.get("magnitude_samples")
-                    )
-            else:
-                pf_mode = mode
-                pf_density = density
-                pf_sign = sign_method
+            # Re-check single-LoRA case (diff computation may have failed for some)
+            if pf_mode == "weighted_sum" and len(diffs_list) <= 1:
+                pass  # weighted_sum with 1 diff is fine
+            elif len(diffs_list) <= 1 and pf_mode != "weighted_sum":
+                pf_mode = "weighted_sum"
 
             merged_diff = self._merge_diffs(
                 diffs_list, pf_mode,
@@ -1563,18 +1586,23 @@ class LoRAOptimizer(_LoRAMergeBase):
             diffs_list.clear()  # Free input diffs from GPU
             if merged_diff is None:
                 return None
-            return (target_key, is_clip_key, merged_diff, pf_mode, lora_prefix, pf_conflict, pf_n_loras)
+            patch = ("diff", (merged_diff,))
+            return (target_key, is_clip_key, patch, pf_mode, lora_prefix, pf_conflict, max(pf_n_loras, len(diffs_list)))
+
+        lowrank_count = 0
 
         def _collect_merge_result(result):
-            nonlocal processed_keys
+            nonlocal processed_keys, lowrank_count
             if result is None:
                 return
-            target_key, is_clip_key, merged_diff, used_mode, prefix, conflict, n_loras = result
+            target_key, is_clip_key, patch, used_mode, prefix, conflict, n_loras = result
             if is_clip_key:
-                clip_patches[target_key] = ("diff", (merged_diff,))
+                clip_patches[target_key] = patch
             else:
-                model_patches[target_key] = ("diff", (merged_diff,))
+                model_patches[target_key] = patch
             processed_keys += 1
+            if patch[0] == "lora":
+                lowrank_count += 1
             strategy_counts[used_mode] = strategy_counts.get(used_mode, 0) + 1
             prefix_decisions.append((prefix, used_mode, conflict, n_loras))
 
@@ -1591,8 +1619,13 @@ class LoRAOptimizer(_LoRAMergeBase):
                 for future in concurrent.futures.as_completed(futures):
                     _collect_merge_result(future.result())
 
+        fullrank_count = processed_keys - lowrank_count
         logging.info(f"[LoRA Optimizer]   Model patches: {len(model_patches)}, "
                      f"CLIP patches: {len(clip_patches)} ({time.time() - t_pass2:.1f}s)")
+        if lowrank_count > 0:
+            logging.info(f"[LoRA Optimizer]   Low-rank patches: {lowrank_count} "
+                         f"(full-rank: {fullrank_count}) — "
+                         f"~{lowrank_count}/{processed_keys} keys use minimal RAM")
         if optimization_mode == "per_prefix":
             logging.info(f"[LoRA Optimizer]   Per-prefix strategies: "
                          f"{strategy_counts.get('weighted_sum', 0)} weighted_sum, "
