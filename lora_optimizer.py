@@ -253,8 +253,8 @@ class _LoRAMergeBase:
     def _compress_to_lowrank(diff, rank):
         """
         Re-compress a full-rank diff tensor to low-rank via truncated SVD.
-        Returns ("lora", (mat_up, mat_down, 1.0, None)) patch — alpha=1.0
-        because the scaling is already baked into the singular values.
+        Returns ("lora", (mat_up, mat_down, alpha=rank, None)) so ComfyUI
+        computes up @ down * (rank/rank) = up @ down (no extra scaling).
 
         For a [4096, 4096] diff at rank 128: 64MB → 2MB (~32x reduction).
         """
