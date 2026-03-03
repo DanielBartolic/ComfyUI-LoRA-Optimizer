@@ -75,6 +75,10 @@ Instead of picking one global strategy (which either wastes TIES trimming on non
 
 This means non-overlapping regions keep 100% of their LoRA's effect, while genuinely conflicting regions get proper TIES resolution.
 
+<p align="center">
+  <img src="assets/merge-strategies.svg" alt="Merge Strategies Comparison" width="100%">
+</p>
+
 #### Optimization Modes
 
 | Mode | Behavior |
