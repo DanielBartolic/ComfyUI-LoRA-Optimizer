@@ -484,9 +484,9 @@ class LoRAOptimizer(_LoRAMergeBase):
                     "default": "disabled",
                     "tooltip": "Release GPU cache between analysis and merge passes. Lowers peak VRAM at negligible speed cost."
                 }),
-                "optimization_mode": (["per_prefix", "global"], {
+                "optimization_mode": (["per_prefix", "global", "weighted_sum_only"], {
                     "default": "per_prefix",
-                    "tooltip": "per_prefix: each weight group picks its own merge strategy based on local conflict. global: single strategy for all (original behavior)."
+                    "tooltip": "per_prefix: each weight group picks its own strategy. global: single strategy for all. weighted_sum_only: force simple weighted sum everywhere (no TIES/averaging, fully compressible)."
                 }),
                 "cache_patches": (["enabled", "disabled"], {
                     "default": "enabled",
@@ -1525,7 +1525,11 @@ class LoRAOptimizer(_LoRAMergeBase):
             pf_mode = mode
             pf_density = density
             pf_sign = sign_method
-            if optimization_mode == "per_prefix" and lora_prefix in prefix_stats:
+            if optimization_mode == "weighted_sum_only":
+                pf_mode = "weighted_sum"
+                pf_n_loras = prefix_stats.get(lora_prefix, {}).get("n_loras", 0)
+                pf_conflict = prefix_stats.get(lora_prefix, {}).get("conflict_ratio", 0.0)
+            elif optimization_mode == "per_prefix" and lora_prefix in prefix_stats:
                 pf = prefix_stats[lora_prefix]
                 pf_conflict = pf["conflict_ratio"]
                 pf_n_loras = pf["n_loras"]
