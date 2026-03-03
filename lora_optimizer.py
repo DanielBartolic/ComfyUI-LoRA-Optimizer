@@ -169,6 +169,9 @@ class _LoRAMergeBase:
         prefix_fixed = {}
         for k, v in lora_sd.items():
             new_k = k
+            # Strip PEFT prefix first so subsequent checks work
+            if new_k.startswith('base_model.model.'):
+                new_k = new_k[len('base_model.model.'):]
             # Musubi Tuner: lora_unet_layers_N_attention_... -> diffusion_model.layers.N.attention...
             if new_k.startswith('lora_unet_'):
                 new_k = new_k.replace('lora_unet_', 'diffusion_model.')
@@ -299,6 +302,10 @@ class _LoRAMergeBase:
         for k, v in lora_sd.items():
             new_k = k
 
+            # Strip PEFT prefix first so subsequent checks work
+            if new_k.startswith('base_model.model.'):
+                new_k = new_k[len('base_model.model.'):]
+
             # AI-Toolkit format
             # transformer.single_transformer_blocks.N -> diffusion_model.single_blocks.N
             new_k = re.sub(
@@ -346,6 +353,10 @@ class _LoRAMergeBase:
         for k, v in lora_sd.items():
             new_k = k
 
+            # Strip PEFT prefix first so subsequent checks work
+            if new_k.startswith('base_model.model.'):
+                new_k = new_k[len('base_model.model.'):]
+
             # LyCORIS/aitoolkit format
             if new_k.startswith('lycoris_blocks_'):
                 new_k = new_k.replace('lycoris_blocks_', 'blocks.')
@@ -358,10 +369,6 @@ class _LoRAMergeBase:
                 new_k = re.sub(r'[._]ffn_net_0_proj', '.ffn.0', new_k)
                 new_k = re.sub(r'[._]ffn_net_2', '.ffn.2', new_k)
                 new_k = new_k.replace('to_out_0', 'o')
-
-            # Strip PEFT prefix first so subsequent checks work
-            if new_k.startswith('base_model.model.'):
-                new_k = new_k[len('base_model.model.'):]
 
             # Diffusers format prefixes
             if new_k.startswith('transformer.'):
