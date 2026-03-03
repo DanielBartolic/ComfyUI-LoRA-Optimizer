@@ -260,6 +260,305 @@ class _LoRAMergeBase:
 
         return normalized
 
+    @staticmethod
+    def _normalize_keys_flux(lora_sd):
+        """
+        Normalize FLUX LoRA keys from various trainer formats to canonical format.
+
+        Canonical format: diffusion_model.double_blocks.N.* / diffusion_model.single_blocks.N.*
+
+        Handles:
+        - AI-Toolkit: transformer.transformer_blocks.N -> double_blocks.N
+                      transformer.single_transformer_blocks.N -> single_blocks.N
+        - Kohya: lora_transformer_double_blocks_N -> double_blocks.N
+                 lora_transformer_single_transformer_blocks_N -> single_blocks.N
+        - Standard: double_blocks.N / single_blocks.N (ensure prefix)
+        """
+        normalized = {}
+        for k, v in lora_sd.items():
+            new_k = k
+
+            # AI-Toolkit format
+            # transformer.single_transformer_blocks.N -> diffusion_model.single_blocks.N
+            new_k = re.sub(
+                r'^transformer\.single_transformer_blocks\.(\d+)\.',
+                r'diffusion_model.single_blocks.\1.', new_k)
+            # transformer.transformer_blocks.N -> diffusion_model.double_blocks.N
+            new_k = re.sub(
+                r'^transformer\.transformer_blocks\.(\d+)\.',
+                r'diffusion_model.double_blocks.\1.', new_k)
+
+            # Kohya underscore format
+            m = re.match(r'^lora_transformer_single_transformer_blocks_(\d+)_(.*)', new_k)
+            if m:
+                block_num = m.group(1)
+                rest = m.group(2).replace('_', '.')
+                new_k = f"diffusion_model.single_blocks.{block_num}.{rest}"
+            m = re.match(r'^lora_transformer_double_blocks_(\d+)_(.*)', new_k)
+            if m:
+                block_num = m.group(1)
+                rest = m.group(2).replace('_', '.')
+                new_k = f"diffusion_model.double_blocks.{block_num}.{rest}"
+
+            # Ensure diffusion_model. prefix for standard format
+            if new_k.startswith('double_blocks.') or new_k.startswith('single_blocks.'):
+                new_k = 'diffusion_model.' + new_k
+
+            # Generic transformer. prefix -> diffusion_model.
+            if new_k.startswith('transformer.'):
+                new_k = new_k.replace('transformer.', 'diffusion_model.', 1)
+
+            normalized[new_k] = v
+        return normalized
+
+    @staticmethod
+    def _normalize_keys_wan(lora_sd):
+        """
+        Normalize Wan LoRA keys from various trainer formats to canonical format.
+
+        Canonical format: diffusion_model.blocks.N.{self_attn,cross_attn,ffn}.*
+
+        Handles LyCORIS, diffusers, Fun LoRA, finetrainer formats.
+        Also applies RS-LoRA alpha compensation if detected.
+        """
+        normalized = {}
+        for k, v in lora_sd.items():
+            new_k = k
+
+            # LyCORIS/aitoolkit format
+            if new_k.startswith('lycoris_blocks_'):
+                new_k = new_k.replace('lycoris_blocks_', 'blocks.')
+                new_k = new_k.replace('_cross_attn_', '.cross_attn.')
+                new_k = new_k.replace('_self_attn_', '.self_attn.')
+                new_k = new_k.replace('_ffn_net_0_proj', '.ffn.0')
+                new_k = new_k.replace('_ffn_net_2', '.ffn.2')
+                new_k = new_k.replace('to_out_0', 'o')
+
+            # Diffusers format prefixes
+            if new_k.startswith('transformer.'):
+                new_k = new_k.replace('transformer.', 'diffusion_model.', 1)
+            if new_k.startswith('pipe.dit.'):
+                new_k = new_k.replace('pipe.dit.', 'diffusion_model.', 1)
+            if new_k.startswith('blocks.'):
+                new_k = 'diffusion_model.' + new_k
+            if new_k.startswith('vace_blocks.'):
+                new_k = 'diffusion_model.' + new_k
+
+            # Common diffusers cleanup
+            new_k = new_k.replace('.default.', '.')
+            new_k = new_k.replace('.diff_m', '.modulation.diff')
+            new_k = new_k.replace('base_model.model.', 'diffusion_model.')
+
+            # Fun LoRA format: lora_unet__blocks_N_...
+            if new_k.startswith('lora_unet__'):
+                parts = new_k.split('.')
+                main_part = parts[0]
+                weight_type = '.'.join(parts[1:]) if len(parts) > 1 else None
+
+                if 'blocks_' in main_part:
+                    components = main_part[len('lora_unet__'):].split('_')
+                    rebuilt = 'diffusion_model'
+
+                    if components[0] == 'blocks':
+                        rebuilt += f".blocks.{components[1]}"
+                        idx = 2
+                        if idx < len(components):
+                            if (components[idx] == 'self' and idx + 1 < len(components)
+                                    and components[idx + 1] == 'attn'):
+                                rebuilt += '.self_attn'
+                                idx += 2
+                            elif (components[idx] == 'cross' and idx + 1 < len(components)
+                                  and components[idx + 1] == 'attn'):
+                                rebuilt += '.cross_attn'
+                                idx += 2
+                            elif components[idx] == 'ffn':
+                                rebuilt += '.ffn'
+                                idx += 1
+                        if idx < len(components):
+                            component = components[idx]
+                            idx += 1
+                            if idx < len(components) and components[idx] == 'img':
+                                component += '_img'
+                                idx += 1
+                            rebuilt += f'.{component}'
+
+                    if weight_type:
+                        if weight_type == 'alpha':
+                            rebuilt += '.alpha'
+                        elif weight_type in ('lora_down.weight', 'lora_down'):
+                            rebuilt += '.lora_A.weight'
+                        elif weight_type in ('lora_up.weight', 'lora_up'):
+                            rebuilt += '.lora_B.weight'
+                        else:
+                            rebuilt += f'.{weight_type}'
+                            if not rebuilt.endswith('.weight'):
+                                rebuilt += '.weight'
+                    new_k = rebuilt
+                else:
+                    new_k = main_part.replace('lora_unet__', 'diffusion_model.')
+                    new_k = new_k.replace('_', '.')
+                    if weight_type:
+                        if weight_type == 'alpha':
+                            new_k += '.alpha'
+                        elif weight_type in ('lora_down.weight', 'lora_down'):
+                            new_k += '.lora_A.weight'
+                        elif weight_type in ('lora_up.weight', 'lora_up'):
+                            new_k += '.lora_B.weight'
+                        else:
+                            new_k += f'.{weight_type}'
+                            if not new_k.endswith('.weight'):
+                                new_k += '.weight'
+
+            # Finetrainer format
+            new_k = new_k.replace('.attn1.to_q.', '.self_attn.q.')
+            new_k = new_k.replace('.attn1.to_k.', '.self_attn.k.')
+            new_k = new_k.replace('.attn1.to_v.', '.self_attn.v.')
+            new_k = new_k.replace('.attn1.to_out.0.', '.self_attn.o.')
+            new_k = new_k.replace('.attn2.to_q.', '.cross_attn.q.')
+            new_k = new_k.replace('.attn2.to_k.', '.cross_attn.k.')
+            new_k = new_k.replace('.attn2.to_v.', '.cross_attn.v.')
+            new_k = new_k.replace('.attn2.to_out.0.', '.cross_attn.o.')
+
+            normalized[new_k] = v
+
+        # RS-LoRA compensation: detect and fix alpha scaling
+        rs_marker = 'diffusion_model.blocks.0.cross_attn.k.lora_A.weight'
+        if rs_marker in normalized:
+            rank = normalized[rs_marker].shape[0]
+            corrected_alpha = torch.tensor(rank * (rank ** 0.5))
+            for nk in list(normalized.keys()):
+                if nk.endswith('.lora_A.weight'):
+                    alpha_key = nk.replace('.lora_A.weight', '.alpha')
+                    if alpha_key not in normalized:
+                        normalized[alpha_key] = corrected_alpha
+
+        return normalized
+
+    @staticmethod
+    def _normalize_keys_sdxl(lora_sd):
+        """
+        Normalize SDXL LoRA keys to canonical format.
+
+        Canonical format: lora_unet_* / lora_te1_* / lora_te2_* (Kohya convention).
+
+        Handles diffusers-format keys (down_blocks.N, up_blocks.N, mid_block).
+        """
+        normalized = {}
+        for k, v in lora_sd.items():
+            new_k = k
+
+            # Diffusers format: text_encoder.* -> lora_te1_*, text_encoder_2.* -> lora_te2_*
+            if new_k.startswith('text_encoder_2.'):
+                new_k = 'lora_te2_' + new_k[len('text_encoder_2.'):].replace('.', '_')
+            elif new_k.startswith('text_encoder.'):
+                new_k = 'lora_te1_' + new_k[len('text_encoder.'):].replace('.', '_')
+
+            # Diffusers UNet: unet.* -> lora_unet_*
+            if new_k.startswith('unet.'):
+                new_k = 'lora_unet_' + new_k[len('unet.'):].replace('.', '_')
+
+            # base_model.model -> strip prefix
+            new_k = new_k.replace('base_model.model.', '')
+
+            normalized[new_k] = v
+        return normalized
+
+    @staticmethod
+    def _normalize_keys_ltx(lora_sd):
+        """
+        Normalize LTX Video LoRA keys to canonical format.
+
+        Canonical format: diffusion_model.transformer_blocks.N.attn1/attn2.to_q/to_k/to_v.*
+
+        LTX uses standard separate Q/K/V — only prefix standardization needed.
+        """
+        normalized = {}
+        for k, v in lora_sd.items():
+            new_k = k
+
+            # Kohya format: lora_unet_transformer_blocks_N_... -> diffusion_model.transformer_blocks.N...
+            if new_k.startswith('lora_unet_'):
+                new_k = new_k.replace('lora_unet_', 'diffusion_model.')
+                # Convert underscores back to dots for known structural segments
+                new_k = re.sub(r'transformer_blocks_(\d+)_', r'transformer_blocks.\1.', new_k)
+                new_k = re.sub(r'attn(\d)_', r'attn\1.', new_k)
+                new_k = re.sub(r'to_(q|k|v|out)_', r'to_\1.', new_k)
+                new_k = re.sub(r'ff_net_(\d+)_', r'ff.net.\1.', new_k)
+
+            # Diffusers format: unet.* -> diffusion_model.*
+            if new_k.startswith('unet.'):
+                new_k = new_k.replace('unet.', 'diffusion_model.', 1)
+
+            # Ensure diffusion_model. prefix
+            if new_k.startswith('transformer_blocks.'):
+                new_k = 'diffusion_model.' + new_k
+
+            # base_model.model prefix
+            new_k = new_k.replace('base_model.model.', 'diffusion_model.')
+
+            normalized[new_k] = v
+        return normalized
+
+    @staticmethod
+    def _normalize_keys_qwen_image(lora_sd):
+        """
+        Normalize Qwen-Image LoRA keys to canonical format.
+
+        Canonical format: diffusion_model.transformer_blocks.N.*
+
+        Qwen-Image uses separate Q/K/V with dual-stream (image+text) attention.
+        Supports transformer.*, lycoris_*, and direct key formats.
+        """
+        normalized = {}
+        for k, v in lora_sd.items():
+            new_k = k
+
+            # LyCORIS format: lycoris_transformer_blocks_N_... -> diffusion_model.transformer_blocks.N...
+            if new_k.startswith('lycoris_'):
+                new_k = new_k.replace('lycoris_', 'diffusion_model.')
+                new_k = re.sub(r'transformer_blocks_(\d+)_', r'transformer_blocks.\1.', new_k)
+                # Restore dots for known component names
+                for comp in ['to_q', 'to_k', 'to_v', 'add_q_proj', 'add_k_proj', 'add_v_proj',
+                             'img_mlp', 'txt_mlp', 'img_mod', 'txt_mod', 'img_norm1', 'img_norm2',
+                             'txt_norm1', 'txt_norm2']:
+                    new_k = new_k.replace(f'_{comp}_', f'.{comp}.')
+                    if new_k.endswith(f'_{comp}'):
+                        new_k = new_k[:-len(f'_{comp}')] + f'.{comp}'
+
+            # transformer.* -> diffusion_model.*
+            if new_k.startswith('transformer.'):
+                new_k = new_k.replace('transformer.', 'diffusion_model.', 1)
+
+            # Ensure diffusion_model. prefix
+            if new_k.startswith('transformer_blocks.'):
+                new_k = 'diffusion_model.' + new_k
+
+            # base_model.model prefix
+            new_k = new_k.replace('base_model.model.', 'diffusion_model.')
+
+            normalized[new_k] = v
+        return normalized
+
+    @classmethod
+    def _normalize_keys(cls, lora_sd, architecture):
+        """
+        Dispatch to architecture-specific key normalizer.
+        Returns a new dict with normalized keys.
+        """
+        if architecture == 'zimage':
+            return cls._normalize_keys_zimage(lora_sd)
+        elif architecture == 'flux':
+            return cls._normalize_keys_flux(lora_sd)
+        elif architecture == 'wan':
+            return cls._normalize_keys_wan(lora_sd)
+        elif architecture == 'sdxl':
+            return cls._normalize_keys_sdxl(lora_sd)
+        elif architecture == 'ltx':
+            return cls._normalize_keys_ltx(lora_sd)
+        elif architecture == 'qwen_image':
+            return cls._normalize_keys_qwen_image(lora_sd)
+        return lora_sd  # unknown — pass through unchanged
+
     def _load_lora(self, lora_name):
         """Loads LoRA file with caching"""
         if lora_name == "None" or lora_name is None:
