@@ -1204,19 +1204,23 @@ class LoRAOptimizer(_LoRAMergeBase):
                 block_data[block_name].append((pf_mode, conflict, n_loras))
 
             # Aggregate per block: dominant strategy, avg conflict, max n_loras
+            # Priority-based dominant: ties > slerp > avg > sum (show most interesting)
+            mode_priority = {"ties": 3, "slerp": 2, "weighted_average": 1, "weighted_sum": 0}
             block_summary = []
             for block_name, entries in block_data.items():
                 modes = [e[0] for e in entries]
                 conflicts = [e[1] for e in entries]
                 n_loras_max = max(e[2] for e in entries)
-                # Dominant mode = most frequent
                 mode_counts = {}
                 for m in modes:
                     mode_counts[m] = mode_counts.get(m, 0) + 1
-                dominant = max(mode_counts, key=mode_counts.get)
-                avg_conflict = sum(conflicts) / len(conflicts) if conflicts else 0
+                # Pick highest-priority mode present (not most frequent)
+                dominant = max(mode_counts, key=lambda m: mode_priority.get(m, -1))
+                # Avg conflict only over multi-LoRA prefixes (sum prefixes have 0 conflict)
+                multi_conflicts = [c for m, c in zip(modes, conflicts) if m != "weighted_sum"]
+                avg_conflict = sum(multi_conflicts) / len(multi_conflicts) if multi_conflicts else 0
                 n_prefixes = len(entries)
-                block_summary.append((block_name, dominant, avg_conflict, n_loras_max, n_prefixes))
+                block_summary.append((block_name, dominant, avg_conflict, n_loras_max, n_prefixes, mode_counts))
 
             # Sort by block name for consistent ordering
             block_summary.sort(key=lambda x: x[0])
@@ -1227,15 +1231,18 @@ class LoRAOptimizer(_LoRAMergeBase):
             labels = {"weighted_sum": "sum", "slerp": "slrp", "weighted_average": "avg", "ties": "TIES"}
             # Find max block name length for alignment
             max_name = max(len(b[0]) for b in block_summary) if block_summary else 10
-            for block_name, dominant, avg_conflict, n_loras_max, n_prefixes in block_summary:
+            for block_name, dominant, avg_conflict, n_loras_max, n_prefixes, mode_counts in block_summary:
                 sym = symbols.get(dominant, "????")
                 lbl = labels.get(dominant, dominant)
-                if dominant == "weighted_sum":
-                    detail = f"1 LoRA"
-                elif dominant == "ties":
-                    detail = f"{avg_conflict:.0%} conflict"
+                if len(mode_counts) == 1 and dominant == "weighted_sum":
+                    detail = "1 LoRA"
                 else:
-                    detail = f"{avg_conflict:.0%} conflict"
+                    # Show breakdown when block has mixed strategies
+                    parts = []
+                    for m in ("weighted_sum", "weighted_average", "slerp", "ties"):
+                        if mode_counts.get(m, 0) > 0:
+                            parts.append(f"{mode_counts[m]} {labels.get(m, m)}")
+                    detail = f"{avg_conflict:.0%} conflict ({', '.join(parts)})"
                 count_str = f"({n_prefixes}x)" if n_prefixes > 1 else ""
                 lines.append(f"  {block_name:<{max_name}}  {sym}  {lbl:<5} {detail} {count_str}")
             lines.append(f"  Legend: ==== sum  ~~~~ slerp  ---- avg  #### TIES")
