@@ -897,11 +897,10 @@ class _LoRAMergeBase:
         """
         if density >= 1.0:
             return tensor
-        # Generate mask on CPU (where the deterministic generator lives), then move to device
         mask = torch.bernoulli(
-            torch.full(tensor.shape, density, dtype=tensor.dtype),
+            torch.full(tensor.shape, density, dtype=tensor.dtype, device=tensor.device),
             generator=generator
-        ).to(device=tensor.device, dtype=tensor.dtype)
+        )
         return tensor * mask * (1.0 / density)
 
     @staticmethod
@@ -923,8 +922,7 @@ class _LoRAMergeBase:
         ranks = (ncols - 1) - asc_ranks
         drop_probs = (p_min + (epsilon / ncols) * ranks).clamp(0.0, 1.0)
         keep_probs = 1.0 - drop_probs
-        # Generate mask on CPU (where the deterministic generator lives), then move to device
-        mask = torch.bernoulli(keep_probs.cpu(), generator=generator).to(device=mat.device)
+        mask = torch.bernoulli(keep_probs, generator=generator)
         rescale = torch.where(mask > 0, 1.0 / keep_probs.clamp(min=1e-6), torch.zeros_like(keep_probs))
         return (mat * mask * rescale).reshape(original_shape)
 
@@ -2539,10 +2537,12 @@ class LoRAOptimizer(_LoRAMergeBase):
                 pf_mode = "weighted_sum"
 
             # Create deterministic per-prefix RNG for reproducible sparsification
+            # Generator lives on compute_device so mask generation stays on GPU
             sp_gen = None
             if sparsification != "disabled":
                 seed = int(hashlib.sha256(lora_prefix.encode()).hexdigest(), 16) % (2**63)
-                sp_gen = torch.Generator(device='cpu')
+                gen_device = compute_device if compute_device is not None else torch.device('cpu')
+                sp_gen = torch.Generator(device=gen_device)
                 sp_gen.manual_seed(seed)
 
             merged_diff = self._merge_diffs(
