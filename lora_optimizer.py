@@ -678,10 +678,10 @@ class _LoRAMergeBase:
                     fused_diff = torch.cat([q_diff, k_diff, v_diff], dim=0)
                     fused[fused_key] = ("diff", (fused_diff,))
                 elif isinstance(q_patch, LoRAAdapter):
-                    q_data = q_patch.lora_data
-                    k_data = k_patch.lora_data
-                    v_data = v_patch.lora_data
-                    # lora_data = (mat_up, mat_down, alpha, mid, dora_scale, bias)
+                    q_data = q_patch.weights
+                    k_data = k_patch.weights
+                    v_data = v_patch.weights
+                    # weights = (mat_up, mat_down, alpha, mid, dora_scale, reshape)
 
                     # Check if down matrices are shared (true for original LoRA,
                     # false for independently SVD-compressed patches)
