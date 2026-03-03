@@ -250,12 +250,13 @@ class _LoRAMergeBase:
 
     @staticmethod
     @torch.no_grad()
-    def _compress_to_lowrank(diff, rank):
+    def _compress_to_lowrank(diff, rank, svd_device=None):
         """
         Re-compress a full-rank diff tensor to low-rank via truncated SVD.
         Returns ("lora", (mat_up, mat_down, alpha=rank, None)) so ComfyUI
         computes up @ down * (rank/rank) = up @ down (no extra scaling).
 
+        svd_device: where to run SVD. GPU is ~10-50x faster. CPU if None.
         For a [4096, 4096] diff at rank 128: 64MB → 2MB (~32x reduction).
         """
         original_shape = diff.shape
@@ -263,16 +264,18 @@ class _LoRAMergeBase:
         mat = diff.reshape(original_shape[0], -1).float()
         rank = min(rank, min(mat.shape))
 
-        # Truncated SVD on CPU (more stable than GPU for large matrices)
-        device = mat.device
-        if device.type != "cpu":
-            mat = mat.cpu()
+        # Move to requested device for SVD (GPU is much faster for matmul-heavy randomized SVD)
+        if svd_device is not None and mat.device != svd_device:
+            mat = mat.to(svd_device)
         U, S, V = torch.svd_lowrank(mat, q=rank)
+        del mat
         # U: [out, rank], S: [rank], V: [in, rank]
         # Reconstruct as: mat_up = U * sqrt(S), mat_down = sqrt(S) * V^T
+        # Return on CPU for storage (ComfyUI moves to device when applying)
         sqrt_S = S.sqrt()
-        mat_up = (U * sqrt_S.unsqueeze(0))    # [out, rank]
-        mat_down = (V * sqrt_S.unsqueeze(0)).T  # [rank, in]
+        mat_up = (U * sqrt_S.unsqueeze(0)).cpu()    # [out, rank]
+        mat_down = ((V * sqrt_S.unsqueeze(0)).T).cpu()  # [rank, in]
+        del U, S, V, sqrt_S
         # alpha=rank so ComfyUI computes: up @ down * (rank/rank) = up @ down
         return ("lora", (mat_up, mat_down, float(rank), None))
 
@@ -555,6 +558,10 @@ class LoRAOptimizer(_LoRAMergeBase):
                     "default": "non_ties",
                     "tooltip": "Re-compress full-rank merged patches to low-rank via SVD. 'non_ties' compresses only weighted_sum/weighted_average prefixes (lossless, TIES stays full-rank). 'all' compresses everything (lossy on TIES prefixes). Recommended for video models."
                 }),
+                "svd_device": (["gpu", "cpu"], {
+                    "default": "gpu",
+                    "tooltip": "Device for SVD compression. GPU is ~10-50x faster. Use CPU if GPU memory is tight."
+                }),
             }
         }
 
@@ -565,7 +572,7 @@ class LoRAOptimizer(_LoRAMergeBase):
     DESCRIPTION = "Auto-analyzes LoRA stack and selects optimal merge strategy per weight group. Outputs merged model + analysis report."
 
     @staticmethod
-    def _compute_cache_key(lora_stack, output_strength, clip_strength_multiplier, auto_strength, optimization_mode="per_prefix", compress_patches="non_ties"):
+    def _compute_cache_key(lora_stack, output_strength, clip_strength_multiplier, auto_strength, optimization_mode="per_prefix", compress_patches="non_ties", svd_device="gpu"):
         """
         Build a deterministic SHA-256 hash (16 hex chars) from the stack
         configuration. Used by IS_CHANGED to let ComfyUI skip re-execution
@@ -583,17 +590,19 @@ class LoRAOptimizer(_LoRAMergeBase):
                     entries.append((str(item.get("name", "")), float(item.get("strength", 0))))
             entries.sort()
             h.update(json.dumps(entries).encode())
-        h.update(f"|os={output_strength}|csm={clip_strength_multiplier}|as={auto_strength}|om={optimization_mode}|cp={compress_patches}".encode())
+        h.update(f"|os={output_strength}|csm={clip_strength_multiplier}|as={auto_strength}|om={optimization_mode}|cp={compress_patches}|sd={svd_device}".encode())
         return h.hexdigest()[:16]
 
     @classmethod
     def IS_CHANGED(cls, model, lora_stack, output_strength, clip=None,
                    clip_strength_multiplier=1.0, auto_strength="disabled",
                    free_vram_between_passes="disabled", optimization_mode="per_prefix",
-                   cache_patches="enabled", compress_patches="non_ties"):
+                   cache_patches="enabled", compress_patches="non_ties",
+                   svd_device="gpu"):
         return cls._compute_cache_key(lora_stack, output_strength,
                                       clip_strength_multiplier, auto_strength,
-                                      optimization_mode, compress_patches)
+                                      optimization_mode, compress_patches,
+                                      svd_device)
 
     def _save_report_to_disk(self, cache_key, lora_combo, auto_strength, report, selected_params):
         """
@@ -1252,7 +1261,7 @@ class LoRAOptimizer(_LoRAMergeBase):
         lines.append("=" * 50)
         return "\n".join(lines)
 
-    def optimize_merge(self, model, lora_stack, output_strength, clip=None, clip_strength_multiplier=1.0, auto_strength="disabled", free_vram_between_passes="disabled", optimization_mode="per_prefix", cache_patches="enabled", compress_patches="non_ties"):
+    def optimize_merge(self, model, lora_stack, output_strength, clip=None, clip_strength_multiplier=1.0, auto_strength="disabled", free_vram_between_passes="disabled", optimization_mode="per_prefix", cache_patches="enabled", compress_patches="non_ties", svd_device="gpu"):
         """
         Main entry point. Two-pass streaming architecture:
         Pass 1: Compute diffs per-prefix, sample conflicts + magnitudes, discard diffs
@@ -1302,7 +1311,8 @@ class LoRAOptimizer(_LoRAMergeBase):
         # triggered by downstream seed changes or similar non-LoRA changes)
         cache_key = self._compute_cache_key(lora_stack, output_strength,
                                             clip_strength_multiplier, auto_strength,
-                                            optimization_mode, compress_patches)
+                                            optimization_mode, compress_patches,
+                                            svd_device)
         if cache_patches == "enabled" and cache_key in self._merge_cache:
             model_patches, clip_patches, report, clip_strength_out = self._merge_cache[cache_key]
             new_model = model
@@ -1549,6 +1559,13 @@ class LoRAOptimizer(_LoRAMergeBase):
             compress_rank = max(sum_rank, 64)  # floor at 64
             logging.info(f"[LoRA Optimizer] Patch compression: {compress_patches} (rank {compress_rank} from sum of input LoRA ranks)")
 
+        # Resolve SVD device for compression
+        resolved_svd_device = None
+        if compress_rank > 0 and svd_device == "gpu" and torch.cuda.is_available():
+            resolved_svd_device = torch.device("cuda")
+        elif compress_rank > 0 and svd_device == "cpu":
+            resolved_svd_device = None  # CPU is the default in _compress_to_lowrank
+
         # =====================================================================
         # Pass 2 — Merge (recompute diffs per-prefix, merge, discard)
         # =====================================================================
@@ -1705,7 +1722,7 @@ class LoRAOptimizer(_LoRAMergeBase):
             should_compress = (compress_rank > 0 and
                                (compress_patches == "all" or pf_mode != "ties"))
             if should_compress:
-                patch = self._compress_to_lowrank(merged_diff, compress_rank)
+                patch = self._compress_to_lowrank(merged_diff, compress_rank, svd_device=resolved_svd_device)
                 del merged_diff
                 is_compressed = True
             else:

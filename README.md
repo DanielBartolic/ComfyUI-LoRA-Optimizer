@@ -147,11 +147,12 @@ Your original strength ratios are always preserved — the algorithm only scales
 |--------|---------|--------|
 | `cache_patches` | enabled | Cache merged patches in RAM for faster re-execution. Disable to free RAM after merge (recommended for video models) |
 | `compress_patches` | non_ties | SVD re-compression of merged patches (see above) |
+| `svd_device` | gpu | Device for SVD compression. GPU is ~10-50x faster than CPU. Use CPU if GPU memory is tight |
 | `free_vram_between_passes` | disabled | Release GPU cache between analysis and merge passes. Lowers peak VRAM at negligible speed cost |
 
 #### Inputs / Outputs
 
-**Inputs:** `MODEL`, `CLIP` (optional), `LORA_STACK`, output strength, clip strength multiplier, auto strength, optimization mode, cache patches, compress patches, free VRAM between passes.
+**Inputs:** `MODEL`, `CLIP` (optional), `LORA_STACK`, output strength, clip strength multiplier, auto strength, optimization mode, cache patches, compress patches, SVD device, free VRAM between passes.
 
 **Outputs:** `MODEL`, `CLIP`, `STRING` (analysis report)
 
