@@ -84,6 +84,7 @@ function updateVisibility(node) {
 
 const LM_LORAS_LIST_URL = "/api/lm/loras/list";
 const LM_BASE_MODELS_URL = "/api/lm/loras/base-models?limit=100";
+const LM_AUTOCOMPLETE_URL = "/api/lm/loras/relative-paths";
 const PAGE_SIZE = 100;
 
 async function fetchJson(url) {
@@ -226,6 +227,187 @@ function applyLoraFilter(node, baseModel, fullLoraList, loraBaseModelMap) {
     app.canvas?.setDirty?.(true, true);
 }
 
+// --- LoRA Text Autocomplete (requires ComfyUI-Lora-Manager) ---
+
+class LoraTextAutocomplete {
+    constructor(textareaEl) {
+        this.textarea = textareaEl;
+        this.items = [];
+        this.selectedIdx = -1;
+        this._debounceTimer = null;
+
+        this.dropdown = document.createElement("div");
+        this.dropdown.style.cssText =
+            "position:absolute;z-index:9999;background:#1a1a2e;border:1px solid #555;" +
+            "max-height:200px;overflow-y:auto;display:none;font-size:13px;" +
+            "border-radius:4px;box-shadow:0 4px 12px rgba(0,0,0,0.4);";
+        document.body.appendChild(this.dropdown);
+
+        this._onInput = this._handleInput.bind(this);
+        this._onKeyDown = this._handleKeyDown.bind(this);
+        this._onBlur = () => setTimeout(() => this._hide(), 150);
+        this.textarea.addEventListener("input", this._onInput);
+        this.textarea.addEventListener("keydown", this._onKeyDown);
+        this.textarea.addEventListener("blur", this._onBlur);
+    }
+
+    _getCurrentLine() {
+        const val = this.textarea.value;
+        const pos = this.textarea.selectionStart;
+        const start = val.lastIndexOf("\n", pos - 1) + 1;
+        let end = val.indexOf("\n", pos);
+        if (end === -1) end = val.length;
+        return { text: val.slice(start, end), start, end };
+    }
+
+    _handleInput() {
+        clearTimeout(this._debounceTimer);
+        this._debounceTimer = setTimeout(async () => {
+            const { text } = this._getCurrentLine();
+            // Strip trailing :N or :N:N for search term
+            const term = text.replace(/:[^:]*$/, "").replace(/:[^:]*$/, "").trim();
+            if (term.length < 2) {
+                this._hide();
+                return;
+            }
+            await this._search(term);
+        }, 200);
+    }
+
+    async _search(term) {
+        try {
+            const params = new URLSearchParams({ search: term, limit: "20" });
+            const data = await fetchJson(`${LM_AUTOCOMPLETE_URL}?${params}`);
+            this.items = data.relative_paths || data || [];
+            if (!Array.isArray(this.items)) this.items = [];
+        } catch {
+            this.items = [];
+        }
+        if (this.items.length === 0) {
+            this._hide();
+            return;
+        }
+        this.selectedIdx = 0;
+        this._render(term);
+        this._show();
+    }
+
+    _render(searchTerm) {
+        this.dropdown.innerHTML = "";
+        const lowerTerm = searchTerm.toLowerCase();
+        this.items.forEach((path, idx) => {
+            const row = document.createElement("div");
+            row.style.cssText =
+                "padding:4px 8px;cursor:pointer;white-space:nowrap;color:#e0e0e0;";
+            if (idx === this.selectedIdx) {
+                row.style.background = "#3a3a5e";
+            }
+            // Highlight matching portion
+            const lowerPath = path.toLowerCase();
+            const matchIdx = lowerPath.indexOf(lowerTerm);
+            if (matchIdx >= 0) {
+                const before = path.slice(0, matchIdx);
+                const match = path.slice(matchIdx, matchIdx + searchTerm.length);
+                const after = path.slice(matchIdx + searchTerm.length);
+                row.innerHTML =
+                    `${this._esc(before)}<b style="color:#7ca8ff">${this._esc(match)}</b>${this._esc(after)}`;
+            } else {
+                row.textContent = path;
+            }
+            row.addEventListener("mousedown", (e) => {
+                e.preventDefault();
+                this._insert(path);
+            });
+            row.addEventListener("mouseenter", () => {
+                this.selectedIdx = idx;
+                this._render(searchTerm);
+            });
+            this.dropdown.appendChild(row);
+        });
+    }
+
+    _esc(str) {
+        const d = document.createElement("span");
+        d.textContent = str;
+        return d.innerHTML;
+    }
+
+    _show() {
+        const rect = this.textarea.getBoundingClientRect();
+        this.dropdown.style.left = `${rect.left + window.scrollX}px`;
+        this.dropdown.style.top = `${rect.bottom + window.scrollY + 2}px`;
+        this.dropdown.style.width = `${rect.width}px`;
+        this.dropdown.style.display = "block";
+    }
+
+    _hide() {
+        this.dropdown.style.display = "none";
+        this.items = [];
+        this.selectedIdx = -1;
+    }
+
+    _insert(path) {
+        const { start, end } = this._getCurrentLine();
+        const val = this.textarea.value;
+        this.textarea.value = val.slice(0, start) + path + val.slice(end);
+        const newPos = start + path.length;
+        this.textarea.setSelectionRange(newPos, newPos);
+        this.textarea.dispatchEvent(new Event("input", { bubbles: true }));
+        this._hide();
+    }
+
+    _handleKeyDown(e) {
+        if (this.dropdown.style.display === "none") return;
+
+        if (e.key === "ArrowDown") {
+            e.preventDefault();
+            this.selectedIdx = (this.selectedIdx + 1) % this.items.length;
+            this._render(this._getCurrentLine().text.replace(/:[^:]*$/, "").replace(/:[^:]*$/, "").trim());
+        } else if (e.key === "ArrowUp") {
+            e.preventDefault();
+            this.selectedIdx = (this.selectedIdx - 1 + this.items.length) % this.items.length;
+            this._render(this._getCurrentLine().text.replace(/:[^:]*$/, "").replace(/:[^:]*$/, "").trim());
+        } else if (e.key === "Enter" && this.selectedIdx >= 0) {
+            e.preventDefault();
+            this._insert(this.items[this.selectedIdx]);
+        } else if (e.key === "Escape") {
+            e.preventDefault();
+            this._hide();
+        }
+    }
+
+    destroy() {
+        clearTimeout(this._debounceTimer);
+        this.textarea.removeEventListener("input", this._onInput);
+        this.textarea.removeEventListener("keydown", this._onKeyDown);
+        this.textarea.removeEventListener("blur", this._onBlur);
+        this.dropdown.remove();
+    }
+}
+
+async function initLoraTextAutocomplete(node, retries = 0) {
+    const textWidget = findWidget(node, "lora_text");
+    if (!textWidget) return;
+
+    // widget.inputEl may not exist yet (lazy DOM creation)
+    if (!textWidget.inputEl) {
+        if (retries < 20) {
+            setTimeout(() => initLoraTextAutocomplete(node, retries + 1), 500);
+        }
+        return;
+    }
+
+    // Probe Lora Manager availability
+    try {
+        await fetchJson(LM_BASE_MODELS_URL);
+    } catch {
+        return; // No Lora Manager — text input works, just no autocomplete
+    }
+
+    const ac = new LoraTextAutocomplete(textWidget.inputEl);
+    node._loraTextAutocomplete = ac;
+}
+
 // --- Node Registration ---
 
 app.registerExtension({
@@ -244,7 +426,19 @@ app.registerExtension({
             updateVisibility(node);
             // Initialize base model filter after visibility is set
             initBaseModelFilter(node);
+            // Initialize autocomplete for lora_text widget
+            initLoraTextAutocomplete(node);
         }, 100);
+
+        // Cleanup on node removal
+        const origOnRemoved = node.onRemoved;
+        node.onRemoved = function () {
+            if (this._loraTextAutocomplete) {
+                this._loraTextAutocomplete.destroy();
+                this._loraTextAutocomplete = null;
+            }
+            if (origOnRemoved) origOnRemoved.call(this);
+        };
     },
 });
 

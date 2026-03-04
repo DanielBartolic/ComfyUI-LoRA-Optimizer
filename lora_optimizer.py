@@ -119,6 +119,18 @@ class LoRAStackDynamic:
                            f"'high_conflict': only where this LoRA disagrees."
             })
         inputs["optional"] = {
+            "lora_text": ("STRING", {
+                "multiline": True,
+                "default": "",
+                "placeholder": "path/to/lora.safetensors:0.8\npath/to/another.safetensors:0.8:0.5",
+                "pysssss.autocomplete": False,
+                "dynamicPrompts": False,
+                "tooltip": "Type LoRA paths directly, one per line. "
+                           "Format: path.safetensors (strength 1.0), "
+                           "path.safetensors:0.8 (both strengths), or "
+                           "path.safetensors:0.8:0.5 (model:clip). "
+                           "Autocomplete available when ComfyUI-Lora-Manager is installed."
+            }),
             "lora_stack": ("LORA_STACK", {"tooltip": "Connect another LoRA Stack node here to add even more LoRAs to the list."}),
             "base_model_filter": (["All"], {
                 "default": "All",
@@ -133,8 +145,53 @@ class LoRAStackDynamic:
     CATEGORY = "loaders/lora"
     DESCRIPTION = "Dynamic LoRA stacker with adjustable slot count and optional per-LoRA CLIP strength"
 
-    def build_stack(self, mode, lora_count, lora_stack=None, base_model_filter=None, **kwargs):
+    @staticmethod
+    def _parse_lora_text(lora_text):
+        """Parse multiline text into LoRA entries.
+
+        Formats (one per line):
+          path/to/lora.safetensors           -> (path, 1.0, 1.0, "all")
+          path/to/lora.safetensors:0.8       -> (path, 0.8, 0.8, "all")
+          path/to/lora.safetensors:0.8:0.5   -> (path, 0.8, 0.5, "all")
+        """
+        if not lora_text or not lora_text.strip():
+            return []
+
+        entries = []
+        for line in lora_text.strip().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+
+            # Try 3-part split: path:model_str:clip_str
+            parts = line.rsplit(":", 2)
+            if len(parts) == 3:
+                try:
+                    clip_str = float(parts[2])
+                    model_str = float(parts[1])
+                    entries.append((parts[0].strip(), model_str, clip_str, "all"))
+                    continue
+                except ValueError:
+                    pass
+
+            # Try 2-part split: path:strength
+            parts = line.rsplit(":", 1)
+            if len(parts) == 2:
+                try:
+                    strength = float(parts[1])
+                    entries.append((parts[0].strip(), strength, strength, "all"))
+                    continue
+                except ValueError:
+                    pass
+
+            # No numeric suffix — entire line is the path, strength 1.0
+            entries.append((line.strip(), 1.0, 1.0, "all"))
+
+        return entries
+
+    def build_stack(self, mode, lora_count, lora_text="", lora_stack=None, base_model_filter=None, **kwargs):
         loras = []
+        # 1. COMBO entries (slots 1-N)
         for i in range(1, lora_count + 1):
             name = kwargs.get(f"lora_name_{i}", "None")
             if name == "None":
@@ -147,6 +204,11 @@ class LoRAStackDynamic:
                 model_str = kwargs.get(f"model_strength_{i}", 1.0)
                 clip_str = kwargs.get(f"clip_strength_{i}", 1.0)
                 loras.append((name, model_str, clip_str, conflict_mode))
+
+        # 2. Text entries (from lora_text)
+        loras.extend(self._parse_lora_text(lora_text))
+
+        # 3. Chained lora_stack entries
         if lora_stack is not None:
             for l in lora_stack:
                 if isinstance(l, dict):
