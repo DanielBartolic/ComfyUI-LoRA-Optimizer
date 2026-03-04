@@ -139,7 +139,7 @@ function setComboOptions(widget, options) {
     // re-selected from the dropdown. This prevents silent data loss when switching filters.
 }
 
-async function initBaseModelFilter(node) {
+async function initBaseModelFilter(node, retries = 0) {
     const filterWidget = findWidget(node, "base_model_filter");
     if (!filterWidget) return;
 
@@ -148,8 +148,10 @@ async function initBaseModelFilter(node) {
     if (!firstLoraWidget) return;
     const loraValues = firstLoraWidget.options?.values;
     if (!loraValues || loraValues.length <= 1) {
-        // Widget not yet populated, retry
-        setTimeout(() => initBaseModelFilter(node), 500);
+        // Widget not yet populated, retry (max 20 attempts = 10 seconds)
+        if (retries < 20) {
+            setTimeout(() => initBaseModelFilter(node, retries + 1), 500);
+        }
         return;
     }
     const fullLoraList = [...loraValues];
