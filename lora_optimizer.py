@@ -97,8 +97,8 @@ class LoRAStackDynamic:
         for i in range(1, cls.MAX_LORAS + 1):
             inputs["required"][f"lora_name_{i}"] = ("STRING", {
                 "default": "None",
-                "tooltip": f"LoRA #{i} — type a LoRA name (e.g. 'Milena_20260216180133'), "
-                           f"a full path, or 'None' to skip. Also accepts text node connections."
+                "tooltip": f"LoRA #{i} — type a LoRA filename (without extension or path), "
+                           f"a full relative path, or 'None' to skip. Accepts text node connections."
             })
             inputs["required"][f"strength_{i}"] = ("FLOAT", {
                 "default": 1.0, "min": -10.0, "max": 10.0, "step": 0.05,
