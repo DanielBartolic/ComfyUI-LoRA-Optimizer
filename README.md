@@ -25,9 +25,12 @@ A ComfyUI node that **automatically analyzes your LoRA stack** and selects the b
 
 ---
 
-### Should I Merge This LoRA?
+<details>
+<summary><b>Should I Merge This LoRA?</b></summary>
 
 <p align="center"><img src="assets/merge-use-cases.png" width="720" alt="Should I merge this LoRA? Decision guide"></p>
+
+</details>
 
 ---
 
@@ -72,13 +75,16 @@ Peak memory is ~one prefix at a time (~260MB) regardless of LoRA count or model 
 
 <p align="center"><img src="assets/optimizer-pipeline.svg" alt="Optimizer Pipeline" width="100%"></p>
 
-#### What It Analyzes
+<details>
+<summary><b>What It Analyzes</b></summary>
 
 - Per-LoRA metrics (rank, key count, effective L2 norms)
 - Pairwise sign conflict ratios per prefix (sampled for efficiency)
 - Pairwise cosine similarity (directional alignment between LoRAs)
 - Magnitude distribution per prefix
 - Key overlap between LoRAs
+
+</details>
 
 #### Per-Prefix Adaptive Merge
 
@@ -333,13 +339,19 @@ Connect the `STRING` output to a **Show Text** node to see the report in ComfyUI
 
 </details>
 
+<details>
+<summary><b>Important notes & limitations</b></summary>
+
 > **Structural & Edit LoRAs:** Do not put distillation LoRAs (LCM, Lightning, Turbo, Hyper), DPO LoRAs, or **edit model LoRAs** (Qwen edit, Klein edit, instruction-editing LoRAs) in the optimizer stack. These LoRAs modify the model's fundamental behavior — their weights are precisely calibrated and merging them with style LoRAs can break their training. Apply them via a standard **Load LoRA** node upstream, then feed only your style/character LoRAs into the optimizer. If you must include an edit LoRA in the stack, use `weighted_sum_only` mode and disable sparsification to avoid weight trimming.
 
 > **Limitation:** The optimizer only analyzes LoRAs in its own stack. It cannot see LoRA patches applied by upstream nodes (Load LoRA, etc.) — those stack additively on top of the optimizer's output. Fully baked merges (safetensors checkpoints) are indistinguishable from base weights and cannot be detected.
 
+</details>
+
 ---
 
-### Save Merged LoRA
+<details>
+<summary><b>Save Merged LoRA</b></summary>
 
 Saves the optimizer's merged result as a standalone `.safetensors` file that works with any standard LoRA loader.
 
@@ -353,9 +365,12 @@ Connect the `LORA_DATA` output from LoRA Optimizer to this node.
 
 **Outputs:** `STRING` (file path)
 
+</details>
+
 ---
 
-### Merged LoRA to Hook
+<details>
+<summary><b>Merged LoRA to Hook</b></summary>
 
 Wraps the optimizer's merged patches as a **conditioning hook** (`HOOKS`) for per-conditioning LoRA application. Instead of applying the merged LoRA globally to the model, you can attach it to specific conditioning entries using ComfyUI's hook system.
 
@@ -364,9 +379,6 @@ Connect the `LORA_DATA` output from LoRA Optimizer to this node, then connect th
 **Inputs:** `LORA_DATA` (required), `HOOKS` (optional — chain with existing hooks)
 
 **Outputs:** `HOOKS`
-
-<details>
-<summary><b>When to use this</b></summary>
 
 Use this node when you want the merged LoRA to apply **only to specific conditioning** rather than the entire model:
 
@@ -388,7 +400,8 @@ The `prev_hooks` input allows chaining multiple hook sources together.
 
 ---
 
-### WanVideo LoRA Optimizer
+<details>
+<summary><b>WanVideo LoRA Optimizer</b></summary>
 
 Variant of the LoRA Optimizer for **WanVideo models** (via [kijai's WanVideoWrapper](https://github.com/kijai/ComfyUI-WanVideoWrapper)). Accepts `WANVIDEOMODEL` instead of `MODEL`, skips CLIP, and applies merged patches in-memory.
 
@@ -397,9 +410,6 @@ All merging algorithms are inherited — TIES, DARE/DELLA, SVD compression, auto
 **Inputs:** `WANVIDEOMODEL`, `LORA_STACK`, output strength, and all optimizer options (except CLIP-related ones). Defaults: `normalize_keys=enabled`, `cache_patches=disabled`.
 
 **Outputs:** `WANVIDEOMODEL` (patched), `STRING` (analysis report), `LORA_DATA` (for Save Merged LoRA)
-
-<details>
-<summary><b>Workflow and usage</b></summary>
 
 **Basic workflow:**
 ```
@@ -429,14 +439,19 @@ WanVideoLoraSelect → WanVideoModelLoader → WANVIDEOMODEL → WanVideo LoRA O
 ### ComfyUI Manager
 Search for "LoRA Optimizer" in ComfyUI Manager and install.
 
-### Manual
+<details>
+<summary><b>Manual install</b></summary>
+
 ```bash
 cd ComfyUI/custom_nodes/
 git clone https://github.com/ethanfel/ComfyUI-LoRA-Optimizer.git
 ```
 Restart ComfyUI. Nodes appear under the `loaders` category.
 
-## Compatibility
+</details>
+
+<details>
+<summary><b>Compatibility</b></summary>
 
 - **Models:** SD 1.5, SDXL, Flux, Z-Image (Lumina2), Wan 2.1/2.2, LTX Video, Qwen-Image, and other architectures supported by ComfyUI
 - **LoRA formats:** Standard LoRA, LoCon, LyCORIS, diffusers/PEFT formats
@@ -445,7 +460,10 @@ Restart ComfyUI. Nodes appear under the `loaders` category.
 - **Z-Image fused QKV:** Split for per-component analysis, re-fused after merge
 - **Stack formats:** Native LoRA Stack dicts, plus standard tuples from Efficiency Nodes / Comfyroll
 
-## Credits
+</details>
+
+<details>
+<summary><b>Credits</b></summary>
 
 - Originally based on [ComfyUI-ZImage-LoRA-Merger](https://github.com/DanrisiUA/ComfyUI-ZImage-LoRA-Merger) by DanrisiUA
 - Per-prefix adaptive approach inspired by [comfyUI-Realtime-Lora](https://github.com/shootthesound/comfyUI-Realtime-Lora) by shootthesound (per-block LoRA analysis)
@@ -453,6 +471,8 @@ Restart ComfyUI. Nodes appear under the `loaders` category.
 - TIES-Merging: [Yadav et al., NeurIPS 2023](https://arxiv.org/abs/2306.01708)
 - DARE: [Yu et al., ICML 2024](https://arxiv.org/abs/2311.03099) — Drop And REscale for language model merging
 - DELLA: [Deep et al., 2024](https://arxiv.org/abs/2406.11617) — magnitude-aware sparsification
+
+</details>
 
 ## License
 
