@@ -87,7 +87,7 @@ class LoRAStackDynamic:
         loras = ["None"] + folder_paths.get_filename_list("loras")
         inputs = {
             "required": {
-                "mode": (["simple", "advanced"], {
+                "strength_mode": (["simple", "advanced"], {
                     "tooltip": "Simple: one strength slider per LoRA (controls both image and text). "
                                "Advanced: separate model_strength and clip_strength sliders for fine-tuning how each LoRA affects image generation vs prompt understanding."
                 }),
@@ -130,6 +130,10 @@ class LoRAStackDynamic:
             })
         inputs["optional"] = {
             "lora_stack": ("LORA_STACK", {"tooltip": "Connect another LoRA Stack node here to add even more LoRAs to the list."}),
+            "base_model_filter": (["All"], {
+                "default": "All",
+                "tooltip": "Filter LoRA dropdowns by base model type (dropdown mode only). Requires ComfyUI-Lora-Manager installed."
+            }),
         }
         return inputs
 
@@ -184,7 +188,7 @@ class LoRAStackDynamic:
         logger.warning(f"LoRA name '{name}' not found in installed LoRAs, skipping")
         return None
 
-    def build_stack(self, mode, input_mode, lora_count, lora_stack=None, **kwargs):
+    def build_stack(self, strength_mode, input_mode, lora_count, lora_stack=None, base_model_filter=None, **kwargs):
         loras = []
         use_text = input_mode == "text"
         for i in range(1, lora_count + 1):
@@ -198,7 +202,7 @@ class LoRAStackDynamic:
             if not resolved:
                 continue
             conflict_mode = kwargs.get(f"conflict_mode_{i}", "all")
-            if mode == "simple":
+            if strength_mode == "simple":
                 wt = kwargs.get(f"strength_{i}", 1.0)
                 loras.append((resolved, wt, wt, conflict_mode))
             else:
