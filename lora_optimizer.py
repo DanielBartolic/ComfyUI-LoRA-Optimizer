@@ -84,7 +84,6 @@ class LoRAStackDynamic:
 
     @classmethod
     def INPUT_TYPES(cls):
-        loras = ["None"] + folder_paths.get_filename_list("loras")
         inputs = {
             "required": {
                 "mode": (["simple", "advanced"], {
@@ -96,8 +95,10 @@ class LoRAStackDynamic:
             }
         }
         for i in range(1, cls.MAX_LORAS + 1):
-            inputs["required"][f"lora_name_{i}"] = (loras, {
-                "tooltip": f"LoRA #{i} — pick a LoRA file or leave as 'None' to skip this slot."
+            inputs["required"][f"lora_name_{i}"] = ("STRING", {
+                "default": "None",
+                "tooltip": f"LoRA #{i} — type a LoRA name (e.g. 'Milena_20260216180133'), "
+                           f"a full path, or 'None' to skip. Also accepts text node connections."
             })
             inputs["required"][f"strength_{i}"] = ("FLOAT", {
                 "default": 1.0, "min": -10.0, "max": 10.0, "step": 0.05,
@@ -120,10 +121,6 @@ class LoRAStackDynamic:
             })
         inputs["optional"] = {
             "lora_stack": ("LORA_STACK", {"tooltip": "Connect another LoRA Stack node here to add even more LoRAs to the list."}),
-            "base_model_filter": (["All"], {
-                "default": "All",
-                "tooltip": "Filter LoRA dropdowns by base model type. Requires ComfyUI-Lora-Manager installed. Hidden if not available."
-            }),
         }
         return inputs
 
@@ -178,12 +175,7 @@ class LoRAStackDynamic:
         logger.warning(f"LoRA name '{name}' not found in installed LoRAs, skipping")
         return None
 
-    @classmethod
-    def VALIDATE_INPUTS(cls, **kwargs):
-        # Accept arbitrary strings for lora_name fields (for text node connections)
-        return True
-
-    def build_stack(self, mode, lora_count, lora_stack=None, base_model_filter=None, **kwargs):
+    def build_stack(self, mode, lora_count, lora_stack=None, **kwargs):
         loras = []
         for i in range(1, lora_count + 1):
             name = kwargs.get(f"lora_name_{i}", "None")
