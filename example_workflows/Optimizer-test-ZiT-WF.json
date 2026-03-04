@@ -1,8 +1,8 @@
 {
   "id": "9ae6082b-c7f4-433c-9971-7a8f65a3ea65",
   "revision": 0,
-  "last_node_id": 576,
-  "last_link_id": 1235,
+  "last_node_id": 590,
+  "last_link_id": 1256,
   "nodes": [
     {
       "id": 46,
@@ -323,60 +323,6 @@
       }
     },
     {
-      "id": 47,
-      "type": "ModelSamplingAuraFlow",
-      "pos": [
-        -1248,
-        -512
-      ],
-      "size": [
-        310,
-        60
-      ],
-      "flags": {},
-      "order": 32,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "model",
-          "type": "MODEL",
-          "link": 1049
-        }
-      ],
-      "outputs": [
-        {
-          "name": "MODEL",
-          "type": "MODEL",
-          "slot_index": 0,
-          "links": [
-            1105
-          ]
-        }
-      ],
-      "properties": {
-        "cnr_id": "comfy-core",
-        "ver": "0.3.64",
-        "Node name for S&R": "ModelSamplingAuraFlow",
-        "enableTabs": false,
-        "tabWidth": 65,
-        "tabXOffset": 10,
-        "hasSecondTab": false,
-        "secondTabText": "Send Back",
-        "secondTabOffset": 80,
-        "secondTabWidth": 65,
-        "ue_properties": {
-          "widget_ue_connectable": {
-            "shift": true
-          },
-          "version": "7.6.2",
-          "input_ue_unconnectable": {}
-        }
-      },
-      "widgets_values": [
-        3
-      ]
-    },
-    {
       "id": 533,
       "type": "Reroute",
       "pos": [
@@ -548,7 +494,7 @@
         26
       ],
       "flags": {},
-      "order": 25,
+      "order": 24,
       "mode": 0,
       "inputs": [
         {
@@ -1043,7 +989,7 @@
         26
       ],
       "flags": {},
-      "order": 24,
+      "order": 25,
       "mode": 0,
       "inputs": [
         {
@@ -1081,7 +1027,7 @@
         26
       ],
       "flags": {},
-      "order": 17,
+      "order": 19,
       "mode": 0,
       "inputs": [
         {
@@ -1119,7 +1065,7 @@
         26
       ],
       "flags": {},
-      "order": 33,
+      "order": 34,
       "mode": 0,
       "inputs": [
         {
@@ -1156,7 +1102,7 @@
         26
       ],
       "flags": {},
-      "order": 34,
+      "order": 33,
       "mode": 0,
       "inputs": [
         {
@@ -1180,52 +1126,6 @@
       }
     },
     {
-      "id": 454,
-      "type": "Seed (rgthree)",
-      "pos": [
-        -800,
-        -384
-      ],
-      "size": [
-        315,
-        130
-      ],
-      "flags": {},
-      "order": 1,
-      "mode": 0,
-      "inputs": [],
-      "outputs": [
-        {
-          "dir": 4,
-          "name": "SEED",
-          "shape": 3,
-          "type": "INT",
-          "links": [
-            1165
-          ]
-        }
-      ],
-      "properties": {
-        "cnr_id": "rgthree-comfy",
-        "ver": "8ff50e4521881eca1fe26aec9615fc9362474931",
-        "randomMax": 1125899906842624,
-        "randomMin": 0,
-        "ue_properties": {
-          "widget_ue_connectable": {},
-          "version": "7.6.2",
-          "input_ue_unconnectable": {}
-        }
-      },
-      "widgets_values": [
-        1090750116585479,
-        "",
-        "",
-        ""
-      ],
-      "color": "#223",
-      "bgcolor": "#335"
-    },
-    {
       "id": 531,
       "type": "Reroute",
       "pos": [
@@ -1237,7 +1137,7 @@
         26
       ],
       "flags": {},
-      "order": 14,
+      "order": 12,
       "mode": 0,
       "inputs": [
         {
@@ -1262,127 +1162,6 @@
       }
     },
     {
-      "id": 550,
-      "type": "PrimitiveStringMultiline",
-      "pos": [
-        -1056,
-        -64
-      ],
-      "size": [
-        384,
-        384
-      ],
-      "flags": {},
-      "order": 2,
-      "mode": 0,
-      "inputs": [],
-      "outputs": [
-        {
-          "name": "STRING",
-          "type": "STRING",
-          "links": [
-            1171,
-            1172,
-            1175
-          ]
-        }
-      ],
-      "properties": {
-        "cnr_id": "comfy-core",
-        "ver": "0.15.1",
-        "Node name for S&R": "PrimitiveStringMultiline"
-      },
-      "widgets_values": [
-        "Subject: Young fairy woman with youthful face, slim and slender yet curvaceous silhouette, thin limbs, gazing directly at viewer.\nHair: Light brunette, layered braids cascading down shoulders.\nClothing: Bodycon dress - teal.\nPose: Leaning casually against a wall, one hip slightly out, relaxed posture.\nEmotions: Uplifting Hope - serene, radiant, gently smiling.\nEnvironment: Sunny noon in a sunroom - warm light flooding through glass walls, soft shadows on tiled floor.\nStyle: phtorealistic Realistic photo. Composed, photographed and rendered to perfection.incredibly lifelike\n"
-      ],
-      "color": "#232",
-      "bgcolor": "#353"
-    },
-    {
-      "id": 443,
-      "type": "EmptyLatentImage",
-      "pos": [
-        -960,
-        352
-      ],
-      "size": [
-        299.6724609375,
-        106
-      ],
-      "flags": {},
-      "order": 3,
-      "mode": 0,
-      "inputs": [],
-      "outputs": [
-        {
-          "name": "LATENT",
-          "type": "LATENT",
-          "links": [
-            934,
-            1155,
-            1156
-          ]
-        }
-      ],
-      "title": "Empty Latent Image (Base DImensions)",
-      "properties": {
-        "cnr_id": "comfy-core",
-        "ver": "0.14.1",
-        "Node name for S&R": "EmptyLatentImage",
-        "ue_properties": {
-          "widget_ue_connectable": {
-            "width": true,
-            "height": true,
-            "batch_size": true
-          },
-          "version": "7.6.2",
-          "input_ue_unconnectable": {}
-        }
-      },
-      "widgets_values": [
-        832,
-        1216,
-        1
-      ]
-    },
-    {
-      "id": 553,
-      "type": "PrimitiveStringMultiline",
-      "pos": [
-        -1056,
-        512
-      ],
-      "size": [
-        384,
-        384
-      ],
-      "flags": {},
-      "order": 4,
-      "mode": 0,
-      "inputs": [],
-      "outputs": [
-        {
-          "name": "STRING",
-          "type": "STRING",
-          "links": [
-            1179,
-            1184,
-            1188
-          ]
-        }
-      ],
-      "properties": {
-        "cnr_id": "comfy-core",
-        "ver": "0.15.1",
-        "Node name for S&R": "PrimitiveStringMultiline"
-      },
-      "widgets_values": [
-        "blurry, jpeg artifacts, low quality, cartoon, plastic skin texture, watermark, signature"
-      ],
-      "color": "#322",
-      "bgcolor": "#533"
-    },
-    {
       "id": 45,
       "type": "CLIPTextEncode",
       "pos": [
@@ -1396,7 +1175,7 @@
       "flags": {
         "collapsed": true
       },
-      "order": 18,
+      "order": 17,
       "mode": 0,
       "inputs": [
         {
@@ -1461,7 +1240,7 @@
       "flags": {
         "collapsed": true
       },
-      "order": 19,
+      "order": 18,
       "mode": 0,
       "inputs": [
         {
@@ -1657,7 +1436,7 @@
         26
       ],
       "flags": {},
-      "order": 11,
+      "order": 14,
       "mode": 0,
       "inputs": [
         {
@@ -1687,72 +1466,6 @@
         "showOutputText": false,
         "horizontal": false
       }
-    },
-    {
-      "id": 552,
-      "type": "CLIPTextEncode",
-      "pos": [
-        -384,
-        1184
-      ],
-      "size": [
-        365.5336277918584,
-        568.648129519661
-      ],
-      "flags": {
-        "collapsed": true
-      },
-      "order": 36,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "clip",
-          "type": "CLIP",
-          "link": 1176
-        },
-        {
-          "name": "text",
-          "type": "STRING",
-          "widget": {
-            "name": "text"
-          },
-          "link": 1175
-        }
-      ],
-      "outputs": [
-        {
-          "name": "CONDITIONING",
-          "type": "CONDITIONING",
-          "links": [
-            1177,
-            1194
-          ]
-        }
-      ],
-      "properties": {
-        "cnr_id": "comfy-core",
-        "ver": "0.3.73",
-        "Node name for S&R": "CLIPTextEncode",
-        "enableTabs": false,
-        "tabWidth": 65,
-        "tabXOffset": 10,
-        "hasSecondTab": false,
-        "secondTabText": "Send Back",
-        "secondTabOffset": 80,
-        "secondTabWidth": 65,
-        "ue_properties": {
-          "widget_ue_connectable": {
-            "text": true
-          },
-          "version": "7.6.2",
-          "input_ue_unconnectable": {}
-        }
-      },
-      "widgets_values": [
-        "Subject: Young fairy woman with youthful face, slim and slender yet curvaceous silhouette, thin limbs, gazing directly at viewer.\nHair: Light brunette, layered braids cascading down shoulders.\nClothing: Bodycon dress - teal.\nPose: Leaning casually against a wall, one hip slightly out, relaxed posture.\nEmotions: Uplifting Hope - serene, radiant, gently smiling.\nEnvironment: Sunny noon in a sunroom - warm light flooding through glass walls, soft shadows on tiled floor.\nStyle: phtorealistic Realistic photo. Composed, photographed and rendered to perfection.incredibly lifelike\n"
-      ],
-      "color": "#232",
-      "bgcolor": "#353"
     },
     {
       "id": 555,
@@ -1855,48 +1568,6 @@
         "showOutputText": false,
         "horizontal": false
       }
-    },
-    {
-      "id": 507,
-      "type": "LoraLoaderModelOnly",
-      "pos": [
-        -2624,
-        -352
-      ],
-      "size": [
-        270,
-        82
-      ],
-      "flags": {},
-      "order": 15,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "model",
-          "type": "MODEL",
-          "link": 1040
-        }
-      ],
-      "outputs": [
-        {
-          "name": "MODEL",
-          "type": "MODEL",
-          "links": [
-            1032,
-            1045,
-            1201
-          ]
-        }
-      ],
-      "properties": {
-        "cnr_id": "comfy-core",
-        "ver": "0.15.1",
-        "Node name for S&R": "LoraLoaderModelOnly"
-      },
-      "widgets_values": [
-        "ZImageTurbo/tool/zit_fdpo_v1.safetensors",
-        0.65
-      ]
     },
     {
       "id": 524,
@@ -2005,7 +1676,7 @@
         {
           "name": "",
           "type": "*",
-          "link": 1204
+          "link": 1256
         }
       ],
       "outputs": [
@@ -2041,7 +1712,7 @@
         {
           "name": "lora_stack",
           "type": "LORA_STACK",
-          "link": 1044
+          "link": 1249
         },
         {
           "name": "model",
@@ -2060,7 +1731,7 @@
           "name": "model",
           "type": "MODEL",
           "links": [
-            1202
+            1251
           ]
         },
         {
@@ -2078,156 +1749,6 @@
         "Node name for S&R": "easy loraStackApply"
       },
       "widgets_values": []
-    },
-    {
-      "id": 558,
-      "type": "Reroute",
-      "pos": [
-        -1568,
-        448
-      ],
-      "size": [
-        75,
-        26
-      ],
-      "flags": {},
-      "order": 29,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "",
-          "type": "*",
-          "link": 1202
-        }
-      ],
-      "outputs": [
-        {
-          "name": "",
-          "type": "MODEL",
-          "links": [
-            1204
-          ]
-        }
-      ],
-      "properties": {
-        "showOutputText": false,
-        "horizontal": false
-      }
-    },
-    {
-      "id": 506,
-      "type": "LoRAOptimizer",
-      "pos": [
-        -1952,
-        -128
-      ],
-      "size": [
-        320.8833312988281,
-        358
-      ],
-      "flags": {},
-      "order": 20,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "model",
-          "type": "MODEL",
-          "link": 1032
-        },
-        {
-          "name": "lora_stack",
-          "type": "LORA_STACK",
-          "link": 1038
-        },
-        {
-          "name": "clip",
-          "shape": 7,
-          "type": "CLIP",
-          "link": 1026
-        }
-      ],
-      "outputs": [
-        {
-          "name": "model",
-          "type": "MODEL",
-          "links": [
-            1207
-          ]
-        },
-        {
-          "name": "clip",
-          "type": "CLIP",
-          "links": [
-            1054
-          ]
-        },
-        {
-          "name": "analysis_report",
-          "type": "STRING",
-          "links": [
-            1030
-          ]
-        },
-        {
-          "name": "lora_data",
-          "type": "LORA_DATA",
-          "links": []
-        }
-      ],
-      "properties": {
-        "cnr_id": "comfyui-lora-optimizer",
-        "ver": "b6a71cfa2c953de3de346d4d192e99645d1e2106",
-        "Node name for S&R": "LoRAOptimizer",
-        "aux_id": "ethanfel/ComfyUI-LoRA-Optimizer"
-      },
-      "widgets_values": [
-        1,
-        1,
-        "enabled",
-        "disabled",
-        "per_prefix",
-        "enabled",
-        "non_ties",
-        "gpu",
-        "disabled",
-        "della_conflict",
-        0.7
-      ]
-    },
-    {
-      "id": 560,
-      "type": "Reroute",
-      "pos": [
-        -1376,
-        1152
-      ],
-      "size": [
-        75,
-        26
-      ],
-      "flags": {},
-      "order": 26,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "",
-          "type": "*",
-          "link": 1207
-        }
-      ],
-      "outputs": [
-        {
-          "name": "",
-          "type": "MODEL",
-          "links": [
-            1209
-          ]
-        }
-      ],
-      "properties": {
-        "showOutputText": false,
-        "horizontal": false
-      }
     },
     {
       "id": 530,
@@ -2336,7 +1857,7 @@
         {
           "name": "",
           "type": "*",
-          "link": 1209
+          "link": 1255
         }
       ],
       "outputs": [
@@ -2437,55 +1958,6 @@
           "type": "IMAGE",
           "links": [
             1216
-          ]
-        }
-      ],
-      "properties": {
-        "cnr_id": "comfy-core",
-        "ver": "0.14.1",
-        "Node name for S&R": "VAEDecode",
-        "ue_properties": {
-          "widget_ue_connectable": {},
-          "version": "7.6.2",
-          "input_ue_unconnectable": {}
-        }
-      },
-      "widgets_values": []
-    },
-    {
-      "id": 525,
-      "type": "VAEDecode",
-      "pos": [
-        1504,
-        1184
-      ],
-      "size": [
-        140,
-        46
-      ],
-      "flags": {
-        "collapsed": false
-      },
-      "order": 56,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "samples",
-          "type": "LATENT",
-          "link": 1084
-        },
-        {
-          "name": "vae",
-          "type": "VAE",
-          "link": 1148
-        }
-      ],
-      "outputs": [
-        {
-          "name": "IMAGE",
-          "type": "IMAGE",
-          "links": [
-            1218
           ]
         }
       ],
@@ -2770,7 +2242,7 @@
       "flags": {
         "collapsed": true
       },
-      "order": 5,
+      "order": 1,
       "mode": 0,
       "inputs": [],
       "outputs": [
@@ -2803,7 +2275,7 @@
         88
       ],
       "flags": {},
-      "order": 12,
+      "order": 11,
       "mode": 0,
       "inputs": [
         {
@@ -2829,46 +2301,6 @@
       },
       "widgets_values": [
         "3"
-      ]
-    },
-    {
-      "id": 505,
-      "type": "easy showAnything",
-      "pos": [
-        -1568,
-        -96
-      ],
-      "size": [
-        384,
-        512
-      ],
-      "flags": {
-        "collapsed": false
-      },
-      "order": 28,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "anything",
-          "shape": 7,
-          "type": "*",
-          "link": 1030
-        }
-      ],
-      "outputs": [
-        {
-          "name": "output",
-          "type": "*",
-          "links": null
-        }
-      ],
-      "properties": {
-        "cnr_id": "comfyui-easy-use",
-        "ver": "1.3.6",
-        "Node name for S&R": "easy showAnything"
-      },
-      "widgets_values": [
-        "==================================================\nLORA OPTIMIZER - ANALYSIS REPORT\n==================================================\n\n--- Per-LoRA Analysis ---\n  ZImageTurbo/character/Milena_20260216180133.safetensors:\n    Strength: 1.0\n    Keys: 208\n    Avg rank: 32\n    L2 norm (mean): 5.4717\n  ZImageTurbo/realistic/skin texture Photorealistic style v4.5.safetensors:\n    Strength: 1.0\n    Keys: 240\n    Avg rank: 32\n    L2 norm (mean): 0.1862\n  ZImageTurbo/base model/moil-pre-6.safetensors:\n    Strength: 1.0\n    Keys: 276\n    Avg rank: 64\n    L2 norm (mean): 28.5335\n\n--- Auto-Strength Adjustment ---\n  ZImageTurbo/character/Milena_20260216180133.safetensors: 1.0 -> 0.9821\n  ZImageTurbo/realistic/skin texture Photorealistic style v4.5.safetensors: 1.0 -> 0.9821\n  ZImageTurbo/base model/moil-pre-6.safetensors: 1.0 -> 0.9821\n  Scale factor: 0.9821\n  Method: interference-aware energy normalization\n    Avg pairwise cosine similarity: 0.003 (mostly orthogonal (independent))\n    Interference-aware energy: 29.0543 (orthogonal assumption: 29.0540)\n    ZImageTurbo/character/Milena_20260216180133.safetensors: 1.0 -> 0.9821\n    ZImageTurbo/realistic/skin texture Photorealistic style v4.5.safetensors: 1.0 -> 0.9821\n    ZImageTurbo/base model/moil-pre-6.safetensors: 1.0 -> 0.9821\n\n--- Pairwise Analysis ---\n  ZImageTurbo/character/Milena_20260216180133.safetensors vs ZImageTurbo/realistic/skin texture Photorealistic style v4.5.safetensors:\n    Overlapping positions: 11952096\n    Sign conflicts: 5953190 (49.8%)\n    Cosine similarity: 0.009\n  ZImageTurbo/character/Milena_20260216180133.safetensors vs ZImageTurbo/base model/moil-pre-6.safetensors:\n    Overlapping positions: 0\n    Sign conflicts: 0 (0.0%)\n    Cosine similarity: 0.000\n  ZImageTurbo/realistic/skin texture Photorealistic style v4.5.safetensors vs ZImageTurbo/base model/moil-pre-6.safetensors:\n    Overlapping positions: 0\n    Sign conflicts: 0 (0.0%)\n    Cosine similarity: 0.000\n\n--- Collection Statistics ---\n  Total LoRAs: 3\n  Total unique keys: 604\n  Avg sign conflict ratio: 49.8%\n  Magnitude ratio (max/min L2): 153.24x\n\n--- Auto-Selected Parameters ---\n  Merge mode: ties\n  Density: 0.10\n  Sign method: total\n  (global fallback — each prefix uses its own parameters)\n  Sparsification: DELLA (conflict-aware)\n  Sparsification density: 0.70 (keep rate)\n  For TIES prefixes: replaces trim step; others: preprocessing\n\n--- Per-Prefix Strategy ---\n  weighted_sum (single LoRA):       484 prefixes (80%)\n  ties (high conflict):             120 prefixes (20%)\n  Total:                            604 prefixes\n\n--- Block Strategy Map ---\n  all_final_layer.2  ====  sum   1 LoRA (2x)\n  all_x_embedder.2   ====  sum   1 LoRA \n  cap_embedder.1     ====  sum   1 LoRA (2x)\n  context_refiner.0  ====  sum   1 LoRA (12x)\n  context_refiner.1  ====  sum   1 LoRA (12x)\n  final.layer        ====  sum   1 LoRA (2x)\n  layers.0           ####  TIES  50% conflict (14 sum, 4 TIES) (18x)\n  layers.1           ####  TIES  50% conflict (14 sum, 4 TIES) (18x)\n  layers.10          ####  TIES  50% conflict (14 sum, 4 TIES) (18x)\n  layers.11          ####  TIES  50% conflict (14 sum, 4 TIES) (18x)\n  layers.12          ####  TIES  50% conflict (14 sum, 4 TIES) (18x)\n  layers.13          ####  TIES  50% conflict (14 sum, 4 TIES) (18x)\n  layers.14          ####  TIES  50% conflict (14 sum, 4 TIES) (18x)\n  layers.15          ####  TIES  50% conflict (14 sum, 4 TIES) (18x)\n  layers.16          ####  TIES  50% conflict (14 sum, 4 TIES) (18x)\n  layers.17          ####  TIES  50% conflict (14 sum, 4 TIES) (18x)\n  layers.18          ####  TIES  50% conflict (14 sum, 4 TIES) (18x)\n  layers.19          ####  TIES  50% conflict (14 sum, 4 TIES) (18x)\n  layers.2           ####  TIES  50% conflict (14 sum, 4 TIES) (18x)\n  layers.20          ####  TIES  50% conflict (14 sum, 4 TIES) (18x)\n  layers.21          ####  TIES  50% conflict (14 sum, 4 TIES) (18x)\n  layers.22          ####  TIES  50% conflict (14 sum, 4 TIES) (18x)\n  layers.23          ####  TIES  49% conflict (14 sum, 4 TIES) (18x)\n  layers.24          ####  TIES  49% conflict (14 sum, 4 TIES) (18x)\n  layers.25          ####  TIES  50% conflict (14 sum, 4 TIES) (18x)\n  layers.26          ####  TIES  50% conflict (14 sum, 4 TIES) (18x)\n  layers.27          ####  TIES  49% conflict (14 sum, 4 TIES) (18x)\n  layers.28          ####  TIES  50% conflict (14 sum, 4 TIES) (18x)\n  layers.29          ####  TIES  50% conflict (14 sum, 4 TIES) (18x)\n  layers.3           ####  TIES  50% conflict (14 sum, 4 TIES) (18x)\n  layers.4           ####  TIES  50% conflict (14 sum, 4 TIES) (18x)\n  layers.5           ####  TIES  50% conflict (14 sum, 4 TIES) (18x)\n  layers.6           ####  TIES  50% conflict (14 sum, 4 TIES) (18x)\n  layers.7           ####  TIES  50% conflict (14 sum, 4 TIES) (18x)\n  layers.8           ####  TIES  50% conflict (14 sum, 4 TIES) (18x)\n  layers.9           ####  TIES  50% conflict (14 sum, 4 TIES) (18x)\n  noise_refiner.0    ====  sum   1 LoRA (14x)\n  noise_refiner.1    ====  sum   1 LoRA (14x)\n  t_embedder_mlp.0   ====  sum   1 LoRA (2x)\n  t_embedder_mlp.2   ====  sum   1 LoRA (2x)\n  x.embedder         ====  sum   1 LoRA \n  Legend: ==== sum  ~~~~ slerp  ---- avg  #### TIES\n\n--- Reasoning ---\n  Sign conflict ratio 49.8% > 25% threshold -> TIES mode selected\n    TIES resolves sign conflicts via trim + elect sign + disjoint merge\n  Auto-density estimated at 0.10 from magnitude distribution\n  Magnitude ratio 153.24x > 2x -> 'total' sign method (magnitude-weighted voting)\n    Stronger LoRA gets more influence in sign election\n\n--- Merge Summary ---\n  Keys processed: 604\n  Model patches: 310\n  CLIP patches: 0\n  Output strength: 1.0\n  CLIP strength: 1.0\n\n=================================================="
       ]
     },
     {
@@ -3050,7 +2482,7 @@
         82
       ],
       "flags": {},
-      "order": 6,
+      "order": 2,
       "mode": 0,
       "inputs": [],
       "outputs": [
@@ -3074,60 +2506,6 @@
       ]
     },
     {
-      "id": 40,
-      "type": "VAELoader",
-      "pos": [
-        -2272,
-        352
-      ],
-      "size": [
-        270,
-        58
-      ],
-      "flags": {},
-      "order": 7,
-      "mode": 0,
-      "inputs": [],
-      "outputs": [
-        {
-          "name": "VAE",
-          "type": "VAE",
-          "links": [
-            1132
-          ]
-        }
-      ],
-      "properties": {
-        "cnr_id": "comfy-core",
-        "ver": "0.3.73",
-        "Node name for S&R": "VAELoader",
-        "models": [
-          {
-            "name": "ae.safetensors",
-            "url": "https://huggingface.co/Comfy-Org/z_image_turbo/resolve/main/split_files/vae/ae.safetensors",
-            "directory": "vae"
-          }
-        ],
-        "enableTabs": false,
-        "tabWidth": 65,
-        "tabXOffset": 10,
-        "hasSecondTab": false,
-        "secondTabText": "Send Back",
-        "secondTabOffset": 80,
-        "secondTabWidth": 65,
-        "ue_properties": {
-          "widget_ue_connectable": {
-            "vae_name": true
-          },
-          "version": "7.6.2",
-          "input_ue_unconnectable": {}
-        }
-      },
-      "widgets_values": [
-        "ae.safetensors"
-      ]
-    },
-    {
       "id": 39,
       "type": "CLIPLoader",
       "pos": [
@@ -3139,7 +2517,7 @@
         106
       ],
       "flags": {},
-      "order": 8,
+      "order": 3,
       "mode": 0,
       "inputs": [],
       "outputs": [
@@ -3185,88 +2563,6 @@
         "qwen_3_4b.safetensors",
         "lumina2",
         "default"
-      ]
-    },
-    {
-      "id": 513,
-      "type": "LoRAStackDynamic",
-      "pos": [
-        -2272,
-        -288
-      ],
-      "size": [
-        288,
-        226
-      ],
-      "flags": {},
-      "order": 9,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "lora_stack",
-          "shape": 7,
-          "type": "LORA_STACK",
-          "link": null
-        }
-      ],
-      "outputs": [
-        {
-          "name": "lora_stack",
-          "type": "LORA_STACK",
-          "links": [
-            1038,
-            1044
-          ]
-        }
-      ],
-      "properties": {
-        "cnr_id": "comfyui-lora-optimizer",
-        "ver": "a38dc9a5f19d5c8a2c13aff95c5346679d9038fc",
-        "Node name for S&R": "LoRAStackDynamic"
-      },
-      "widgets_values": [
-        "simple",
-        3,
-        "ZImageTurbo/character/Milena_20260216180133.safetensors",
-        1,
-        1,
-        1,
-        "ZImageTurbo/realistic/skin texture Photorealistic style v4.5.safetensors",
-        1,
-        1,
-        1,
-        "ZImageTurbo/base model/moil-pre-6.safetensors",
-        1,
-        1,
-        1,
-        "None",
-        1,
-        1,
-        1,
-        "None",
-        1,
-        1,
-        1,
-        "None",
-        1,
-        1,
-        1,
-        "None",
-        1,
-        1,
-        1,
-        "None",
-        1,
-        1,
-        1,
-        "None",
-        1,
-        1,
-        1,
-        "None",
-        1,
-        1,
-        1
       ]
     },
     {
@@ -3321,6 +2617,776 @@
         "Base Model",
         "up"
       ]
+    },
+    {
+      "id": 553,
+      "type": "PrimitiveStringMultiline",
+      "pos": [
+        -1056,
+        512
+      ],
+      "size": [
+        384,
+        384
+      ],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "STRING",
+          "type": "STRING",
+          "links": [
+            1179,
+            1184,
+            1188
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.15.1",
+        "Node name for S&R": "PrimitiveStringMultiline"
+      },
+      "widgets_values": [
+        "blurry, jpeg artifacts, low quality, cartoon, plastic skin texture, watermark, signature"
+      ],
+      "color": "#322",
+      "bgcolor": "#533"
+    },
+    {
+      "id": 505,
+      "type": "easy showAnything",
+      "pos": [
+        -1568,
+        -96
+      ],
+      "size": [
+        384,
+        512
+      ],
+      "flags": {
+        "collapsed": false
+      },
+      "order": 28,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "anything",
+          "shape": 7,
+          "type": "*",
+          "link": 1030
+        }
+      ],
+      "outputs": [
+        {
+          "name": "output",
+          "type": "*",
+          "links": null
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfyui-easy-use",
+        "ver": "1.3.6",
+        "Node name for S&R": "easy showAnything"
+      },
+      "widgets_values": [
+        "==================================================\nLORA OPTIMIZER - ANALYSIS REPORT\n==================================================\n\n--- Per-LoRA Analysis ---\n  ZImageTurbo/concept/TeeKaysTittyTime_SteepSlopeTiddies_v1-2_ZiT.safetensors:\n    Strength: 1.0\n    Keys: 240\n    Avg rank: 32\n    L2 norm (mean): 1.8629\n  ZImageTurbo/character/Milena_20260216180133.safetensors:\n    Strength: 1.0\n    Keys: 208\n    Avg rank: 32\n    L2 norm (mean): 5.4717\n\n--- Auto-Strength Adjustment ---\n  ZImageTurbo/concept/TeeKaysTittyTime_SteepSlopeTiddies_v1-2_ZiT.safetensors: 1.0 -> 0.9451\n  ZImageTurbo/character/Milena_20260216180133.safetensors: 1.0 -> 0.9451\n  Scale factor: 0.9451\n  Method: interference-aware energy normalization\n    Avg pairwise cosine similarity: 0.005 (mostly orthogonal (independent))\n    Interference-aware energy: 5.7898 (orthogonal assumption: 5.7802)\n    ZImageTurbo/concept/TeeKaysTittyTime_SteepSlopeTiddies_v1-2_ZiT.safetensors: 1.0 -> 0.9451\n    ZImageTurbo/character/Milena_20260216180133.safetensors: 1.0 -> 0.9451\n\n--- Pairwise Analysis ---\n  ZImageTurbo/concept/TeeKaysTittyTime_SteepSlopeTiddies_v1-2_ZiT.safetensors vs ZImageTurbo/character/Milena_20260216180133.safetensors:\n    Overlapping positions: 11952038\n    Sign conflicts: 5958534 (49.9%)\n    Cosine similarity: 0.005\n\n--- Collection Statistics ---\n  Total LoRAs: 2\n  Total unique keys: 328\n  Avg sign conflict ratio: 49.9%\n  Magnitude ratio (max/min L2): 2.94x\n\n--- Auto-Selected Parameters ---\n  Merge mode: ties\n  Density: 0.10\n  Sign method: total\n  (global fallback — each prefix uses its own parameters)\n  Sparsification: DELLA (conflict-aware)\n  Sparsification density: 0.70 (keep rate)\n  For TIES prefixes: replaces trim step; others: preprocessing\n\n--- Per-Prefix Strategy ---\n  weighted_sum (single LoRA):       208 prefixes (63%)\n  ties (high conflict):             120 prefixes (37%)\n  Total:                            328 prefixes\n\n--- Block Strategy Map ---\n  cap_embedder.1     ====  sum   1 LoRA \n  context_refiner.0  ====  sum   1 LoRA (5x)\n  context_refiner.1  ====  sum   1 LoRA (5x)\n  final.layer        ====  sum   1 LoRA (2x)\n  layers.0           ####  TIES  50% conflict (6 sum, 4 TIES) (10x)\n  layers.1           ####  TIES  50% conflict (6 sum, 4 TIES) (10x)\n  layers.10          ####  TIES  50% conflict (6 sum, 4 TIES) (10x)\n  layers.11          ####  TIES  50% conflict (6 sum, 4 TIES) (10x)\n  layers.12          ####  TIES  50% conflict (6 sum, 4 TIES) (10x)\n  layers.13          ####  TIES  50% conflict (6 sum, 4 TIES) (10x)\n  layers.14          ####  TIES  50% conflict (6 sum, 4 TIES) (10x)\n  layers.15          ####  TIES  50% conflict (6 sum, 4 TIES) (10x)\n  layers.16          ####  TIES  50% conflict (6 sum, 4 TIES) (10x)\n  layers.17          ####  TIES  50% conflict (6 sum, 4 TIES) (10x)\n  layers.18          ####  TIES  50% conflict (6 sum, 4 TIES) (10x)\n  layers.19          ####  TIES  50% conflict (6 sum, 4 TIES) (10x)\n  layers.2           ####  TIES  50% conflict (6 sum, 4 TIES) (10x)\n  layers.20          ####  TIES  50% conflict (6 sum, 4 TIES) (10x)\n  layers.21          ####  TIES  50% conflict (6 sum, 4 TIES) (10x)\n  layers.22          ####  TIES  50% conflict (6 sum, 4 TIES) (10x)\n  layers.23          ####  TIES  50% conflict (6 sum, 4 TIES) (10x)\n  layers.24          ####  TIES  50% conflict (6 sum, 4 TIES) (10x)\n  layers.25          ####  TIES  50% conflict (6 sum, 4 TIES) (10x)\n  layers.26          ####  TIES  49% conflict (6 sum, 4 TIES) (10x)\n  layers.27          ####  TIES  50% conflict (6 sum, 4 TIES) (10x)\n  layers.28          ####  TIES  50% conflict (6 sum, 4 TIES) (10x)\n  layers.29          ####  TIES  50% conflict (6 sum, 4 TIES) (10x)\n  layers.3           ####  TIES  50% conflict (6 sum, 4 TIES) (10x)\n  layers.4           ####  TIES  50% conflict (6 sum, 4 TIES) (10x)\n  layers.5           ####  TIES  50% conflict (6 sum, 4 TIES) (10x)\n  layers.6           ####  TIES  50% conflict (6 sum, 4 TIES) (10x)\n  layers.7           ####  TIES  50% conflict (6 sum, 4 TIES) (10x)\n  layers.8           ####  TIES  50% conflict (6 sum, 4 TIES) (10x)\n  layers.9           ####  TIES  50% conflict (6 sum, 4 TIES) (10x)\n  noise_refiner.0    ====  sum   1 LoRA (6x)\n  noise_refiner.1    ====  sum   1 LoRA (6x)\n  t_embedder_mlp.0   ====  sum   1 LoRA \n  t_embedder_mlp.2   ====  sum   1 LoRA \n  x.embedder         ====  sum   1 LoRA \n  Legend: ==== sum  ~~~~ slerp  ---- avg  #### TIES\n\n--- Reasoning ---\n  Sign conflict ratio 49.9% > 25% threshold -> TIES mode selected\n    TIES resolves sign conflicts via trim + elect sign + disjoint merge\n  Auto-density estimated at 0.10 from magnitude distribution\n  Magnitude ratio 2.94x > 2x -> 'total' sign method (magnitude-weighted voting)\n    Stronger LoRA gets more influence in sign election\n\n--- Merge Summary ---\n  Keys processed: 328\n  Model patches: 298\n  CLIP patches: 0\n  Output strength: 1.0\n  CLIP strength: 1.0\n\n=================================================="
+      ]
+    },
+    {
+      "id": 525,
+      "type": "VAEDecode",
+      "pos": [
+        1504,
+        1184
+      ],
+      "size": [
+        140,
+        46
+      ],
+      "flags": {
+        "collapsed": false
+      },
+      "order": 56,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "samples",
+          "type": "LATENT",
+          "link": 1084
+        },
+        {
+          "name": "vae",
+          "type": "VAE",
+          "link": 1148
+        }
+      ],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            1218
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.14.1",
+        "Node name for S&R": "VAEDecode",
+        "ue_properties": {
+          "widget_ue_connectable": {},
+          "version": "7.6.2",
+          "input_ue_unconnectable": {}
+        }
+      },
+      "widgets_values": []
+    },
+    {
+      "id": 552,
+      "type": "CLIPTextEncode",
+      "pos": [
+        -384,
+        1184
+      ],
+      "size": [
+        365.5336277918584,
+        568.648129519661
+      ],
+      "flags": {
+        "collapsed": true
+      },
+      "order": 36,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "link": 1176
+        },
+        {
+          "name": "text",
+          "type": "STRING",
+          "widget": {
+            "name": "text"
+          },
+          "link": 1175
+        }
+      ],
+      "outputs": [
+        {
+          "name": "CONDITIONING",
+          "type": "CONDITIONING",
+          "links": [
+            1177,
+            1194
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.3.73",
+        "Node name for S&R": "CLIPTextEncode",
+        "enableTabs": false,
+        "tabWidth": 65,
+        "tabXOffset": 10,
+        "hasSecondTab": false,
+        "secondTabText": "Send Back",
+        "secondTabOffset": 80,
+        "secondTabWidth": 65,
+        "ue_properties": {
+          "widget_ue_connectable": {
+            "text": true
+          },
+          "version": "7.6.2",
+          "input_ue_unconnectable": {}
+        }
+      },
+      "widgets_values": [
+        "Subject: Young fairy woman with youthful face, slim and slender yet curvaceous silhouette, thin limbs, gazing directly at viewer.\nHair: Light brunette, layered braids cascading down shoulders.\nClothing: Bodycon dress - teal.\nPose: Leaning casually against a wall, one hip slightly out, relaxed posture.\nEmotions: Uplifting Hope - serene, radiant, gently smiling.\nEnvironment: Sunny noon in a sunroom - warm light flooding through glass walls, soft shadows on tiled floor.\nStyle: phtorealistic Realistic photo. Composed, photographed and rendered to perfection.incredibly lifelike\n"
+      ],
+      "color": "#232",
+      "bgcolor": "#353"
+    },
+    {
+      "id": 550,
+      "type": "PrimitiveStringMultiline",
+      "pos": [
+        -1056,
+        -64
+      ],
+      "size": [
+        384,
+        384
+      ],
+      "flags": {},
+      "order": 5,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "STRING",
+          "type": "STRING",
+          "links": [
+            1171,
+            1172,
+            1175
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.15.1",
+        "Node name for S&R": "PrimitiveStringMultiline"
+      },
+      "widgets_values": [
+        "Subject: Young fairy woman with youthful face, slim and slender yet curvaceous silhouette, thin limbs, gazing directly at viewer. large breast, GodTierTits\nHair: Light brunette, layered braids cascading down shoulders.\nClothing: red sexy office suit with with cream silk blouse.\nPose: turned right Backside with One arm raised, fingers running through or lifting hair. Hip pushed to the side, slight torso twist, weight on one foot.\nEmotions: Uplifting Hope - serene, radiant, gently smiling.\nEnvironment:\nUpscale living room, midday sun streaming through tall floor-to-ceiling windows with sheer ivory linen curtains catching the breeze. Warm golden light rakes across a plush low-profile sofa in muted sage velvet, casting long soft shadows over a large hand-knotted wool rug in cream and terracotta geometric patterns. A marble-topped coffee table reflects ambient light, scattered with an open coffee table book, a half-empty glass of water, and a small ceramic vase with dried pampas grass. Built-in bookshelves line one wall, packed with books, small sculptures, and trailing pothos vines. A vintage brass floor lamp stands unlit in the corner. Wooden herringbone parquet floors with a warm honey tone. Faint dust motes visible in the shafts of sunlight. The room feels lived-in, curated, quietly luxurious.\n\nStyle:\nPhotorealistic. Shot on full-frame DSLR, 85mm f/1.8 lens, natural light only. Shallow depth of field with background elements softly bokeh'd. Color grading warm but neutral — no Instagram filters, true-to-life skin tones and material textures. Every surface rendered with tactile precision: fabric weave, marble veining, wood grain, glass clarity. Composed like an editorial interior shot crossed with a fashion photograph. Cinematic stillness. Incredibly lifelike."
+      ],
+      "color": "#232",
+      "bgcolor": "#353"
+    },
+    {
+      "id": 47,
+      "type": "ModelSamplingAuraFlow",
+      "pos": [
+        -1248,
+        -512
+      ],
+      "size": [
+        310,
+        60
+      ],
+      "flags": {},
+      "order": 32,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 1049
+        }
+      ],
+      "outputs": [
+        {
+          "name": "MODEL",
+          "type": "MODEL",
+          "slot_index": 0,
+          "links": [
+            1105
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.3.64",
+        "Node name for S&R": "ModelSamplingAuraFlow",
+        "enableTabs": false,
+        "tabWidth": 65,
+        "tabXOffset": 10,
+        "hasSecondTab": false,
+        "secondTabText": "Send Back",
+        "secondTabOffset": 80,
+        "secondTabWidth": 65,
+        "ue_properties": {
+          "widget_ue_connectable": {
+            "shift": true
+          },
+          "version": "7.6.2",
+          "input_ue_unconnectable": {}
+        }
+      },
+      "widgets_values": [
+        3
+      ]
+    },
+    {
+      "id": 506,
+      "type": "LoRAOptimizer",
+      "pos": [
+        -1952,
+        -160
+      ],
+      "size": [
+        320.8833312988281,
+        358
+      ],
+      "flags": {},
+      "order": 20,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 1032
+        },
+        {
+          "name": "lora_stack",
+          "type": "LORA_STACK",
+          "link": 1248
+        },
+        {
+          "name": "clip",
+          "shape": 7,
+          "type": "CLIP",
+          "link": 1026
+        },
+        {
+          "name": "merge_strategy_override",
+          "shape": 7,
+          "type": "STRING",
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "links": [
+            1253
+          ]
+        },
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "links": [
+            1054
+          ]
+        },
+        {
+          "name": "analysis_report",
+          "type": "STRING",
+          "links": [
+            1030
+          ]
+        },
+        {
+          "name": "lora_data",
+          "type": "LORA_DATA",
+          "links": []
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfyui-lora-optimizer",
+        "ver": "b6a71cfa2c953de3de346d4d192e99645d1e2106",
+        "Node name for S&R": "LoRAOptimizer",
+        "aux_id": "ethanfel/ComfyUI-LoRA-Optimizer"
+      },
+      "widgets_values": [
+        1,
+        1,
+        "enabled",
+        "disabled",
+        "per_prefix",
+        "enabled",
+        "non_ties",
+        "gpu",
+        "disabled",
+        "della_conflict",
+        0.7
+      ]
+    },
+    {
+      "id": 507,
+      "type": "LoraLoaderModelOnly",
+      "pos": [
+        -2592,
+        -352
+      ],
+      "size": [
+        270,
+        82
+      ],
+      "flags": {},
+      "order": 15,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 1040
+        }
+      ],
+      "outputs": [
+        {
+          "name": "MODEL",
+          "type": "MODEL",
+          "links": [
+            1032,
+            1045,
+            1201
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.15.1",
+        "Node name for S&R": "LoraLoaderModelOnly"
+      },
+      "widgets_values": [
+        "ZImageTurbo/tool/zit_fdpo_v1.safetensors",
+        0.65
+      ]
+    },
+    {
+      "id": 589,
+      "type": "ModelSamplingAuraFlow",
+      "pos": [
+        -1568,
+        480
+      ],
+      "size": [
+        310,
+        60
+      ],
+      "flags": {},
+      "order": 29,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 1251
+        }
+      ],
+      "outputs": [
+        {
+          "name": "MODEL",
+          "type": "MODEL",
+          "slot_index": 0,
+          "links": [
+            1256
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.3.64",
+        "Node name for S&R": "ModelSamplingAuraFlow",
+        "enableTabs": false,
+        "tabWidth": 65,
+        "tabXOffset": 10,
+        "hasSecondTab": false,
+        "secondTabText": "Send Back",
+        "secondTabOffset": 80,
+        "secondTabWidth": 65,
+        "ue_properties": {
+          "widget_ue_connectable": {
+            "shift": true
+          },
+          "version": "7.6.2",
+          "input_ue_unconnectable": {}
+        }
+      },
+      "widgets_values": [
+        3
+      ]
+    },
+    {
+      "id": 590,
+      "type": "ModelSamplingAuraFlow",
+      "pos": [
+        -1376,
+        1120
+      ],
+      "size": [
+        310,
+        60
+      ],
+      "flags": {},
+      "order": 26,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 1253
+        }
+      ],
+      "outputs": [
+        {
+          "name": "MODEL",
+          "type": "MODEL",
+          "slot_index": 0,
+          "links": [
+            1255
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.3.64",
+        "Node name for S&R": "ModelSamplingAuraFlow",
+        "enableTabs": false,
+        "tabWidth": 65,
+        "tabXOffset": 10,
+        "hasSecondTab": false,
+        "secondTabText": "Send Back",
+        "secondTabOffset": 80,
+        "secondTabWidth": 65,
+        "ue_properties": {
+          "widget_ue_connectable": {
+            "shift": true
+          },
+          "version": "7.6.2",
+          "input_ue_unconnectable": {}
+        }
+      },
+      "widgets_values": [
+        3
+      ]
+    },
+    {
+      "id": 40,
+      "type": "VAELoader",
+      "pos": [
+        -2272,
+        352
+      ],
+      "size": [
+        270,
+        58
+      ],
+      "flags": {},
+      "order": 6,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "VAE",
+          "type": "VAE",
+          "links": [
+            1132
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.3.73",
+        "Node name for S&R": "VAELoader",
+        "models": [
+          {
+            "name": "ae.safetensors",
+            "url": "https://huggingface.co/Comfy-Org/z_image_turbo/resolve/main/split_files/vae/ae.safetensors",
+            "directory": "vae"
+          }
+        ],
+        "enableTabs": false,
+        "tabWidth": 65,
+        "tabXOffset": 10,
+        "hasSecondTab": false,
+        "secondTabText": "Send Back",
+        "secondTabOffset": 80,
+        "secondTabWidth": 65,
+        "ue_properties": {
+          "widget_ue_connectable": {
+            "vae_name": true
+          },
+          "version": "7.6.2",
+          "input_ue_unconnectable": {}
+        }
+      },
+      "widgets_values": [
+        "ultrafluxVAEImproved_v10.safetensors"
+      ]
+    },
+    {
+      "id": 584,
+      "type": "LoRAStackDynamic",
+      "pos": [
+        -2944,
+        -32
+      ],
+      "size": [
+        608,
+        346
+      ],
+      "flags": {},
+      "order": 7,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "lora_stack",
+          "shape": 7,
+          "type": "LORA_STACK",
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "lora_stack",
+          "type": "LORA_STACK",
+          "links": [
+            1248,
+            1249
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfyui-lora-optimizer",
+        "ver": "3e87562cd80d7a6d77818396eec981b503f4cb43",
+        "Node name for S&R": "LoRAStackDynamic"
+      },
+      "widgets_values": [
+        "simple",
+        "dropdown",
+        3,
+        "ZImageTurbo/concept/TeeKaysTittyTime_SteepSlopeTiddies_v1-2_ZiT.safetensors",
+        "TeeKaysTittyTime_GodTierTits_V1-1_ZIT",
+        1,
+        1,
+        1,
+        "all",
+        "ZImageTurbo/character/Milena_20260216180133.safetensors",
+        "Milena_20260216180133",
+        1,
+        1,
+        1,
+        "all",
+        "None",
+        "skin texture v2.1",
+        1,
+        1,
+        1,
+        "all",
+        "None",
+        "None",
+        1,
+        1,
+        1,
+        "all",
+        "None",
+        "None",
+        1,
+        1,
+        1,
+        "all",
+        "ZImageTurbo/character/Milena_20260216180133.safetensors",
+        "Milena_20260216180133",
+        1,
+        1,
+        1,
+        "all",
+        "None",
+        "None",
+        1,
+        1,
+        1,
+        "all",
+        "None",
+        "None",
+        1,
+        1,
+        1,
+        "all",
+        "None",
+        "None",
+        1,
+        1,
+        1,
+        "all",
+        "None",
+        "None",
+        1,
+        1,
+        1,
+        "all",
+        "ZImageTurbo"
+      ]
+    },
+    {
+      "id": 443,
+      "type": "EmptyLatentImage",
+      "pos": [
+        -2656,
+        384
+      ],
+      "size": [
+        299.6724609375,
+        106
+      ],
+      "flags": {},
+      "order": 8,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "LATENT",
+          "type": "LATENT",
+          "links": [
+            934,
+            1155,
+            1156
+          ]
+        }
+      ],
+      "title": "Empty Latent Image (Base DImensions)",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.14.1",
+        "Node name for S&R": "EmptyLatentImage",
+        "ue_properties": {
+          "widget_ue_connectable": {
+            "width": true,
+            "height": true,
+            "batch_size": true
+          },
+          "version": "7.6.2",
+          "input_ue_unconnectable": {}
+        }
+      },
+      "widgets_values": [
+        832,
+        1216,
+        1
+      ]
+    },
+    {
+      "id": 454,
+      "type": "Seed (rgthree)",
+      "pos": [
+        -2272,
+        -352
+      ],
+      "size": [
+        315,
+        130
+      ],
+      "flags": {},
+      "order": 9,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "dir": 4,
+          "name": "SEED",
+          "shape": 3,
+          "type": "INT",
+          "links": [
+            1165
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "rgthree-comfy",
+        "ver": "8ff50e4521881eca1fe26aec9615fc9362474931",
+        "randomMax": 1125899906842624,
+        "randomMin": 0,
+        "ue_properties": {
+          "widget_ue_connectable": {},
+          "version": "7.6.2",
+          "input_ue_unconnectable": {}
+        }
+      },
+      "widgets_values": [
+        544801778414638,
+        "",
+        "",
+        ""
+      ],
+      "color": "#223",
+      "bgcolor": "#335"
     }
   ],
   "links": [
@@ -3397,14 +3463,6 @@
       "MODEL"
     ],
     [
-      1038,
-      513,
-      0,
-      506,
-      1,
-      "LORA_STACK"
-    ],
-    [
       1039,
       46,
       0,
@@ -3419,14 +3477,6 @@
       507,
       0,
       "MODEL"
-    ],
-    [
-      1044,
-      513,
-      0,
-      516,
-      0,
-      "LORA_STACK"
     ],
     [
       1045,
@@ -3981,22 +4031,6 @@
       "MODEL"
     ],
     [
-      1202,
-      516,
-      0,
-      558,
-      0,
-      "MODEL"
-    ],
-    [
-      1204,
-      558,
-      0,
-      559,
-      0,
-      "MODEL"
-    ],
-    [
       1205,
       559,
       0,
@@ -4009,22 +4043,6 @@
       559,
       0,
       520,
-      0,
-      "MODEL"
-    ],
-    [
-      1207,
-      506,
-      0,
-      560,
-      0,
-      "MODEL"
-    ],
-    [
-      1209,
-      560,
-      0,
-      561,
       0,
       "MODEL"
     ],
@@ -4139,6 +4157,54 @@
       574,
       2,
       "STRING"
+    ],
+    [
+      1248,
+      584,
+      0,
+      506,
+      1,
+      "LORA_STACK"
+    ],
+    [
+      1249,
+      584,
+      0,
+      516,
+      0,
+      "LORA_STACK"
+    ],
+    [
+      1251,
+      516,
+      0,
+      589,
+      0,
+      "MODEL"
+    ],
+    [
+      1253,
+      506,
+      0,
+      590,
+      0,
+      "MODEL"
+    ],
+    [
+      1255,
+      590,
+      0,
+      561,
+      0,
+      "MODEL"
+    ],
+    [
+      1256,
+      589,
+      0,
+      559,
+      0,
+      "MODEL"
     ]
   ],
   "groups": [
@@ -4146,8 +4212,8 @@
       "id": 5,
       "title": "LoRA input",
       "bounding": [
-        -2282,
-        -363.6,
+        -2272,
+        -352,
         1108,
         789.6
       ],
@@ -4159,10 +4225,10 @@
   "config": {},
   "extra": {
     "ds": {
-      "scale": 0.5730855330116976,
+      "scale": 0.3234918430760693,
       "offset": [
-        5278.92202387054,
-        1000.6762564361935
+        6556.506461963131,
+        1405.0680497824596
       ]
     },
     "frontendVersion": "1.39.19",
