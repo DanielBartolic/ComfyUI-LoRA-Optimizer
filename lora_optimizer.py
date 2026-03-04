@@ -3009,12 +3009,355 @@ class SaveMergedLoRA:
         return (save_path,)
 
 
+class LoRAConflictEditor(_LoRAMergeBase):
+    """
+    Analyzes pairwise sign conflicts between LoRAs in a stack and enriches
+    each entry with an auto-suggested (or manually overridden) conflict_mode.
+
+    Connect between a LoRA Stack and the LoRA Optimizer. The editor loads
+    all LoRA weights, computes full-rank diffs, and measures how much each
+    pair's weight updates disagree in sign. Based on the results it suggests
+    per-LoRA conflict modes (all / low_conflict / high_conflict) and a
+    merge strategy (ties / weighted_average / weighted_sum).
+
+    The enriched stack and a human-readable analysis report are passed
+    downstream so the optimizer can apply the right strategy per LoRA.
+    """
+
+    MAX_LORAS = 10
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        inputs = {
+            "required": {
+                "lora_stack": ("LORA_STACK", {
+                    "tooltip": "Connect a LoRA Stack node here. The editor will analyze conflicts between these LoRAs."
+                }),
+                "merge_strategy": (["auto", "ties", "weighted_average", "weighted_sum"], {
+                    "default": "auto",
+                    "tooltip": "Merge strategy to pass to the optimizer. "
+                               "'auto': let the optimizer decide based on conflict analysis. "
+                               "'ties': force TIES merging (good for high-conflict stacks). "
+                               "'weighted_average': force simple averaging (good for compatible LoRAs). "
+                               "'weighted_sum': force direct addition (preserves all weights exactly)."
+                }),
+            }
+        }
+        for i in range(1, cls.MAX_LORAS + 1):
+            inputs["required"][f"conflict_mode_{i}"] = (["auto", "all", "low_conflict", "high_conflict"], {
+                "default": "auto",
+                "tooltip": f"LoRA #{i} conflict filter. "
+                           f"'auto': node suggests based on analysis. "
+                           f"'all': apply everywhere. "
+                           f"'low_conflict': only where this LoRA agrees with the majority. "
+                           f"'high_conflict': only where this LoRA disagrees."
+            })
+        return inputs
+
+    RETURN_TYPES = ("LORA_STACK", "STRING", "STRING")
+    RETURN_NAMES = ("lora_stack", "analysis_report", "merge_strategy")
+    FUNCTION = "analyze_and_enrich"
+    CATEGORY = "loaders/lora"
+
+    def __init__(self):
+        super().__init__()
+
+    def analyze_and_enrich(self, lora_stack, merge_strategy, **kwargs):
+        """
+        Analyze pairwise conflicts in the LoRA stack, auto-suggest conflict
+        modes, and return an enriched stack with the analysis report.
+        """
+        import os
+
+        # --- 1. Normalize and filter ---
+        normalized = self._normalize_stack(lora_stack)
+        active_loras = [item for item in normalized if item["strength"] != 0]
+
+        n_active = len(active_loras)
+        if n_active == 0:
+            return (lora_stack, "No active LoRAs in stack.", merge_strategy)
+
+        # Read per-LoRA conflict_mode widgets
+        widget_modes = {}
+        for i, item in enumerate(active_loras):
+            widget_key = f"conflict_mode_{i + 1}"
+            widget_modes[i] = kwargs.get(widget_key, "auto")
+
+        # --- 2. Collect all unique LoRA prefixes ---
+        all_prefixes = set()
+        suffixes_to_strip = [
+            ".lora_up.weight", ".lora_down.weight",
+            ".lora_A.weight", ".lora_B.weight",
+            ".lora.up.weight", ".lora.down.weight",
+            "_lora.up.weight", "_lora.down.weight",
+            ".lora_up", ".lora_down",
+        ]
+        for item in active_loras:
+            for key in item["lora"].keys():
+                if "lora_up" in key or "lora_down" in key or "lora_A" in key or "lora_B" in key:
+                    for suffix in suffixes_to_strip:
+                        if key.endswith(suffix):
+                            all_prefixes.add(key[:-len(suffix)])
+                            break
+
+        compute_device = self._get_compute_device()
+
+        # --- 3. Pairwise conflict analysis ---
+        # Accumulators: per-pair totals
+        n_pairs = n_active * (n_active - 1) // 2
+        pair_overlap = [[0] * n_active for _ in range(n_active)]
+        pair_conflict = [[0] * n_active for _ in range(n_active)]
+        pair_dot = [[0.0] * n_active for _ in range(n_active)]
+        pair_norm_a_sq = [[0.0] * n_active for _ in range(n_active)]
+        pair_norm_b_sq = [[0.0] * n_active for _ in range(n_active)]
+
+        prefixes_analyzed = 0
+
+        for prefix in sorted(all_prefixes):
+            # Compute diffs for each LoRA that has this prefix
+            diffs = {}
+            for idx, item in enumerate(active_loras):
+                info = self._get_lora_key_info(item["lora"], prefix)
+                if info is None:
+                    continue
+                mat_up, mat_down, alpha, mid = info
+                rank = mat_down.shape[0]
+                scale = alpha / rank
+
+                if compute_device.type != "cpu":
+                    mat_up = mat_up.to(compute_device)
+                    mat_down = mat_down.to(compute_device)
+                    if mid is not None:
+                        mid = mid.to(compute_device)
+
+                if mid is not None:
+                    final_shape = [mat_down.shape[1], mat_down.shape[0], mid.shape[2], mid.shape[3]]
+                    mat_down = (
+                        torch.mm(
+                            mat_down.transpose(0, 1).flatten(start_dim=1).float(),
+                            mid.transpose(0, 1).flatten(start_dim=1).float(),
+                        )
+                        .reshape(final_shape)
+                        .transpose(0, 1)
+                    )
+
+                diff = torch.mm(
+                    mat_up.flatten(start_dim=1).float(),
+                    mat_down.flatten(start_dim=1).float()
+                )
+                diff = diff * scale * item["strength"]
+
+                if compute_device.type != "cpu":
+                    diff = diff.cpu()
+
+                diffs[idx] = diff
+
+            if len(diffs) < 2:
+                continue
+
+            prefixes_analyzed += 1
+
+            # Pairwise conflict sampling
+            indices = sorted(diffs.keys())
+            for ai in range(len(indices)):
+                for bi in range(ai + 1, len(indices)):
+                    a_idx, b_idx = indices[ai], indices[bi]
+                    result = self._sample_conflict(
+                        diffs[a_idx], diffs[b_idx], device=compute_device
+                    )
+                    n_ov, n_cf, dot, na_sq, nb_sq = result
+                    pair_overlap[a_idx][b_idx] += n_ov
+                    pair_conflict[a_idx][b_idx] += n_cf
+                    pair_dot[a_idx][b_idx] += dot
+                    pair_norm_a_sq[a_idx][b_idx] += na_sq
+                    pair_norm_b_sq[a_idx][b_idx] += nb_sq
+
+            # Free diffs for this prefix immediately
+            del diffs
+
+        # --- 4. Compute per-LoRA average conflict ratio ---
+        per_lora_conflict_ratios = [0.0] * n_active
+        per_lora_pair_count = [0] * n_active
+
+        # Also build pairwise summary for the report
+        pair_summaries = []
+
+        for i in range(n_active):
+            for j in range(i + 1, n_active):
+                total_ov = pair_overlap[i][j]
+                total_cf = pair_conflict[i][j]
+                total_dot = pair_dot[i][j]
+                total_na = pair_norm_a_sq[i][j]
+                total_nb = pair_norm_b_sq[i][j]
+
+                if total_ov > 0:
+                    conflict_ratio = total_cf / total_ov
+                    denom = math.sqrt(total_na * total_nb) if (total_na > 0 and total_nb > 0) else 1.0
+                    cosine_sim = total_dot / denom if denom > 0 else 0.0
+                else:
+                    conflict_ratio = 0.0
+                    cosine_sim = 0.0
+
+                per_lora_conflict_ratios[i] += conflict_ratio
+                per_lora_conflict_ratios[j] += conflict_ratio
+                per_lora_pair_count[i] += 1
+                per_lora_pair_count[j] += 1
+
+                pair_summaries.append({
+                    "i": i, "j": j,
+                    "overlap": total_ov,
+                    "conflict_ratio": conflict_ratio,
+                    "cosine_sim": cosine_sim,
+                })
+
+        # Average per-LoRA conflict ratio
+        avg_conflict = [0.0] * n_active
+        for i in range(n_active):
+            if per_lora_pair_count[i] > 0:
+                avg_conflict[i] = per_lora_conflict_ratios[i] / per_lora_pair_count[i]
+
+        # --- 5. Auto-suggest conflict modes ---
+        resolved_modes = []
+        auto_reasons = []
+        for i in range(n_active):
+            widget_mode = widget_modes.get(i, "auto")
+            if widget_mode != "auto":
+                resolved_modes.append(widget_mode)
+                auto_reasons.append("manual")
+            else:
+                ratio = avg_conflict[i]
+                if ratio < 0.15:
+                    mode = "all"
+                    reason = f"auto \u2014 avg conflict {ratio:.1%} < 15%"
+                elif ratio <= 0.40:
+                    mode = "low_conflict"
+                    reason = f"auto \u2014 avg conflict {ratio:.1%} (15\u201340%)"
+                else:
+                    mode = "high_conflict"
+                    reason = f"auto \u2014 avg conflict {ratio:.1%} > 40%"
+                resolved_modes.append(mode)
+                auto_reasons.append(reason)
+
+        # --- 6. Resolve merge strategy ---
+        if merge_strategy == "auto":
+            # Use the global average conflict across all pairs
+            if n_pairs > 0 and len(pair_summaries) > 0:
+                global_avg = sum(p["conflict_ratio"] for p in pair_summaries) / len(pair_summaries)
+            else:
+                global_avg = 0.0
+
+            if global_avg > 0.25:
+                resolved_strategy = "ties"
+                strategy_reason = f"auto \u2014 avg conflict {global_avg:.1%} > 25%"
+            else:
+                resolved_strategy = "weighted_average"
+                strategy_reason = f"auto \u2014 avg conflict {global_avg:.1%} \u2264 25%"
+        else:
+            resolved_strategy = merge_strategy
+            strategy_reason = "manual"
+
+        # --- 7. Build enriched output stack ---
+        first = lora_stack[0] if lora_stack else None
+        is_dict_format = isinstance(first, dict)
+
+        enriched = []
+        active_idx = 0
+        for item in normalized:
+            if item["strength"] == 0:
+                # Pass through inactive LoRAs unchanged
+                if is_dict_format:
+                    enriched.append(item)
+                else:
+                    enriched.append((item["name"], item["strength"],
+                                     item["clip_strength"], item.get("conflict_mode", "all")))
+            else:
+                mode = resolved_modes[active_idx]
+                if is_dict_format:
+                    enriched_item = dict(item)
+                    enriched_item["conflict_mode"] = mode
+                    enriched.append(enriched_item)
+                else:
+                    enriched.append((
+                        item["name"],
+                        item["strength"],
+                        item["clip_strength"],
+                        mode,
+                    ))
+                active_idx += 1
+
+        # --- 8. Build report ---
+        short_names = []
+        for item in active_loras:
+            short_names.append(os.path.splitext(os.path.basename(item["name"]))[0])
+
+        report = self._build_conflict_report(
+            active_loras, short_names, pair_summaries,
+            resolved_modes, auto_reasons,
+            resolved_strategy, strategy_reason,
+            prefixes_analyzed,
+        )
+
+        return (enriched, report, resolved_strategy)
+
+    @staticmethod
+    def _build_conflict_report(active_loras, short_names, pair_summaries,
+                               resolved_modes, auto_reasons,
+                               resolved_strategy, strategy_reason,
+                               prefixes_analyzed):
+        """Build a human-readable conflict analysis report."""
+        lines = []
+        lines.append("=" * 60)
+        lines.append("LoRA Conflict Analysis Report")
+        lines.append("=" * 60)
+
+        # Stack overview
+        lines.append("")
+        lines.append("Stack Overview")
+        lines.append("-" * 40)
+        for i, item in enumerate(active_loras):
+            lines.append(f"  {i + 1}. {short_names[i]}  (strength={item['strength']:.2f})")
+        lines.append(f"  Prefixes analyzed: {prefixes_analyzed}")
+
+        # Pairwise conflicts
+        if pair_summaries:
+            lines.append("")
+            lines.append("Pairwise Conflicts")
+            lines.append("-" * 40)
+            for p in pair_summaries:
+                name_a = short_names[p["i"]]
+                name_b = short_names[p["j"]]
+                lines.append(
+                    f"  {name_a} \u00d7 {name_b}: "
+                    f"overlap={p['overlap']:,}  "
+                    f"sign_conflict={p['conflict_ratio']:.1%}  "
+                    f"cosine={p['cosine_sim']:.3f}"
+                )
+
+        # Applied conflict modes
+        lines.append("")
+        lines.append("Applied Conflict Modes")
+        lines.append("-" * 40)
+        for i in range(len(active_loras)):
+            lines.append(f"  {i + 1}. {short_names[i]}: {resolved_modes[i]}  ({auto_reasons[i]})")
+
+        # Merge strategy
+        lines.append("")
+        lines.append("Merge Strategy")
+        lines.append("-" * 40)
+        lines.append(f"  {resolved_strategy}  ({strategy_reason})")
+
+        lines.append("")
+        lines.append("=" * 60)
+        return "\n".join(lines)
+
+
 # Node registration
 NODE_CLASS_MAPPINGS = {
     "LoRAStack": LoRAStack,
     "LoRAStackDynamic": LoRAStackDynamic,
     "LoRAOptimizer": LoRAOptimizer,
     "SaveMergedLoRA": SaveMergedLoRA,
+    "LoRAConflictEditor": LoRAConflictEditor,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -3022,4 +3365,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "LoRAStackDynamic": "LoRA Stack (Dynamic)",
     "LoRAOptimizer": "LoRA Optimizer",
     "SaveMergedLoRA": "Save Merged LoRA",
+    "LoRAConflictEditor": "LoRA Conflict Editor",
 }
