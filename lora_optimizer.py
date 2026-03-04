@@ -3009,31 +3009,31 @@ class SaveMergedLoRA:
 
         state_dict = {}
 
-        for target_key, patch in list(model_patches.items()) + list(clip_patches.items()):
-            is_clip = target_key in clip_patches
-            tkey = target_key[0] if isinstance(target_key, tuple) else target_key
-            lora_prefix = key_map.get(tkey, tkey)
+        for is_clip, patches in [(False, model_patches), (True, clip_patches)]:
+            for target_key, patch in patches.items():
+                tkey = target_key[0] if isinstance(target_key, tuple) else target_key
+                lora_prefix = key_map.get(tkey, tkey)
 
-            if isinstance(patch, LoRAAdapter):
-                mat_up, mat_down, alpha, mid, _, _ = patch.weights
-                alpha = float(alpha) if alpha is not None else float(mat_down.shape[0])
-            elif isinstance(patch, tuple) and len(patch) == 2 and patch[0] == "diff":
-                diff_tensor = patch[1][0]
-                rank = fallback_rank if auto_rank else save_rank
-                compressed = LoRAOptimizer._compress_to_lowrank(diff_tensor, rank)
-                mat_up, mat_down, alpha, mid, _, _ = compressed.weights
-                alpha = float(alpha)
-            else:
-                logging.warning(f"[Save Merged LoRA] Skipping unknown patch type for {lora_prefix}: {type(patch)}")
-                continue
+                if isinstance(patch, LoRAAdapter):
+                    mat_up, mat_down, alpha, mid, _, _ = patch.weights
+                    alpha = float(alpha) if alpha is not None else float(mat_down.shape[0])
+                elif isinstance(patch, tuple) and len(patch) == 2 and patch[0] == "diff":
+                    diff_tensor = patch[1][0]
+                    rank = fallback_rank if auto_rank else save_rank
+                    compressed = LoRAOptimizer._compress_to_lowrank(diff_tensor, rank)
+                    mat_up, mat_down, alpha, mid, _, _ = compressed.weights
+                    alpha = float(alpha)
+                else:
+                    logging.warning(f"[Save Merged LoRA] Skipping unknown patch type for {lora_prefix}: {type(patch)}")
+                    continue
 
-            if bake_strength:
-                strength = clip_strength if is_clip else output_strength
-                alpha *= strength
+                if bake_strength:
+                    strength = clip_strength if is_clip else output_strength
+                    alpha *= strength
 
-            state_dict[f"{lora_prefix}.lora_up.weight"] = mat_up.contiguous()
-            state_dict[f"{lora_prefix}.lora_down.weight"] = mat_down.contiguous()
-            state_dict[f"{lora_prefix}.alpha"] = torch.tensor(alpha)
+                state_dict[f"{lora_prefix}.lora_up.weight"] = mat_up.contiguous()
+                state_dict[f"{lora_prefix}.lora_down.weight"] = mat_down.contiguous()
+                state_dict[f"{lora_prefix}.alpha"] = torch.tensor(alpha)
 
         save_file(state_dict, save_path)
         logging.info(f"[Save Merged LoRA] Saved {len(state_dict) // 3} LoRA keys to {save_path}")
@@ -3382,6 +3382,10 @@ class LoRAConflictEditor(_LoRAMergeBase):
             resolved_strategy, strategy_reason,
             prefixes_analyzed,
         )
+
+        # Free loaded LoRA state dicts — the editor only needs them during analysis,
+        # and keeping them would leak hundreds of MB per run for large models.
+        self.loaded_loras.clear()
 
         return (enriched, report, resolved_strategy)
 
