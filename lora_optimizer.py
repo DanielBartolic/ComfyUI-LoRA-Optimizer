@@ -95,9 +95,9 @@ class LoRAStackDynamic:
         loras = ["None"] + folder_paths.get_filename_list("loras")
         inputs = {
             "required": {
-                "strength_mode": (["simple", "advanced"], {
-                    "tooltip": "Simple: one strength slider per LoRA (controls both image and text). "
-                               "Advanced: separate model_strength and clip_strength sliders for fine-tuning how each LoRA affects image generation vs prompt understanding."
+                "settings_visibility": (["simple", "advanced"], {
+                    "tooltip": "Simple: one strength slider per LoRA. "
+                               "Advanced: separate model/clip strength, conflict mode, and key filter per LoRA."
                 }),
                 "input_mode": (["dropdown", "text"], {
                     "default": "dropdown",
@@ -208,7 +208,7 @@ class LoRAStackDynamic:
         logger.warning(f"LoRA name '{name}' not found in installed LoRAs, skipping")
         return None
 
-    def build_stack(self, strength_mode, input_mode, lora_count, lora_stack=None, base_model_filter=None, **kwargs):
+    def build_stack(self, settings_visibility, input_mode, lora_count, lora_stack=None, base_model_filter=None, **kwargs):
         loras = []
         use_text = input_mode == "text"
         for i in range(1, lora_count + 1):
@@ -223,7 +223,7 @@ class LoRAStackDynamic:
                 continue
             conflict_mode = kwargs.get(f"conflict_mode_{i}", "all")
             kf = kwargs.get(f"key_filter_{i}", "all")
-            if strength_mode == "simple":
+            if settings_visibility == "simple":
                 wt = kwargs.get(f"strength_{i}", 1.0)
                 loras.append((resolved, wt, wt, conflict_mode, kf))
             else:
@@ -3872,6 +3872,63 @@ class MergedLoRAToHook:
         return (prev_hooks.clone_and_combine(hook_group),)
 
 
+class MergedLoRAToWanVideo:
+    """Applies merged LoRA patches to a WanVideo wrapper model."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "wan_model": ("WANVIDEOMODEL",),
+            },
+            "optional": {
+                "lora_data": ("LORA_DATA",),
+            },
+        }
+
+    RETURN_TYPES = ("WANVIDEOMODEL",)
+    RETURN_NAMES = ("model",)
+    FUNCTION = "apply_patches"
+    CATEGORY = "LoRA Optimizer"
+    DESCRIPTION = (
+        "Bridges merged LoRA patches from the LoRA Optimizer to a WanVideo wrapper model. "
+        "Use this when the WanVideo wrapper exposes fewer keys than the core MODEL, "
+        "ensuring all merged patches reach the sampler via set_lora_params."
+    )
+
+    def apply_patches(self, wan_model, lora_data=None):
+        if lora_data is None:
+            return (wan_model,)
+
+        model_patches = lora_data.get("model_patches", {})
+        if not model_patches:
+            return (wan_model,)
+
+        output_strength = lora_data.get("output_strength", 1.0)
+        new_model = wan_model.clone()
+
+        # Inject merged patches in the format set_lora_params expects:
+        # patcher.patches[key] = [(strength, patch_obj, 1.0, None, None)]
+        #
+        # set_lora_params (custom_linear.py:101-106) looks up keys as
+        # "diffusion_model.{module_prefix}weight" and falls back to
+        # stripping "_orig_mod." — so our core-model keys will match.
+        applied = 0
+        for key, patch in model_patches.items():
+            patch_key = key if isinstance(key, str) else key[0]
+            current = new_model.patches.get(patch_key, [])
+            current.append((output_strength, patch, 1.0, None, None))
+            new_model.patches[patch_key] = current
+            applied += 1
+
+        import uuid
+        new_model.patches_uuid = uuid.uuid4()
+
+        logging.info(f"[MergedLoRAToWanVideo] Applied {applied} merged patches "
+                     f"(output_strength={output_strength})")
+        return (new_model,)
+
+
 class LoRAConflictEditor(_LoRAMergeBase):
     """
     Analyzes pairwise sign conflicts between LoRAs in a stack and enriches
@@ -4283,6 +4340,7 @@ NODE_CLASS_MAPPINGS = {
     "SaveMergedLoRA": SaveMergedLoRA,
     "LoRAConflictEditor": LoRAConflictEditor,
     "MergedLoRAToHook": MergedLoRAToHook,
+    "MergedLoRAToWanVideo": MergedLoRAToWanVideo,
     "WanVideoLoRAOptimizer": WanVideoLoRAOptimizer,
 }
 
@@ -4294,5 +4352,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "SaveMergedLoRA": "Save Merged LoRA",
     "LoRAConflictEditor": "LoRA Conflict Editor",
     "MergedLoRAToHook": "Merged LoRA to Hook",
+    "MergedLoRAToWanVideo": "Merged LoRA → WanVideo",
     "WanVideoLoRAOptimizer": "WanVideo LoRA Optimizer",
 }
