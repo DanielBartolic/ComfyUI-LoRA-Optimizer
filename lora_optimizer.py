@@ -4245,11 +4245,14 @@ class LoRAAutoTuner(LoRAOptimizer):
             c_patches = lora_data["clip_patches"] if lora_data else {}
             compute_svd = scoring_svd == "enabled"
             score_dev = torch.device("cuda") if scoring_device == "gpu" and torch.cuda.is_available() else None
+            t_score = time.time()
             measured = _score_merge_result(m_patches, c_patches, compute_svd=compute_svd, score_device=score_dev)
+            t_score_elapsed = time.time() - t_score
 
             t_elapsed = time.time() - t_merge
             logging.info(f"[LoRA AutoTuner]   Candidate #{rank_idx + 1}: "
-                         f"measured={measured['composite_score']:.3f} ({t_elapsed:.1f}s)")
+                         f"measured={measured['composite_score']:.3f} "
+                         f"(merge {t_elapsed - t_score_elapsed:.1f}s + score {t_score_elapsed:.1f}s)")
             pbar.update(1)
 
             results.append({
