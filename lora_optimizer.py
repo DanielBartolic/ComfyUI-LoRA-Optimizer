@@ -1003,10 +1003,12 @@ class _LoRAMergeBase:
         return (flat * mask).reshape(tensor.shape)
 
     @staticmethod
-    def _dare_sparsify(tensor, density, generator=None):
+    def _dare_sparsify(tensor, density, generator=None, dampening=0.0):
         """
         DARE sparsification: randomly drop parameters and rescale survivors.
-        Each element is kept with probability `density`, then rescaled by 1/density.
+        Each element is kept with probability `density`, then rescaled by 1/q.
+        With dampening=0: q=density (standard DARE). With dampening>0: q is
+        interpolated toward 1.0, reducing noise amplification (DAREx, ICLR 2025).
         """
         if density >= 1.0:
             return tensor
@@ -1014,7 +1016,8 @@ class _LoRAMergeBase:
             torch.full(tensor.shape, density, dtype=tensor.dtype, device=tensor.device),
             generator=generator
         )
-        return tensor * mask * (1.0 / density)
+        q = density + dampening * (1.0 - density)
+        return tensor * mask * (1.0 / q)
 
     @staticmethod
     def _della_sparsify(tensor, density, epsilon=0.3, generator=None):
@@ -1055,14 +1058,15 @@ class _LoRAMergeBase:
         return has_positive & has_negative
 
     @staticmethod
-    def _dare_sparsify_conflict(tensor, conflict_mask, density, generator=None):
+    def _dare_sparsify_conflict(tensor, conflict_mask, density, generator=None, dampening=0.0):
         if density >= 1.0:
             return tensor
         rand_mask = torch.bernoulli(
             torch.full(tensor.shape, density, dtype=tensor.dtype, device=tensor.device),
             generator=generator
         )
-        return torch.where(conflict_mask, tensor * rand_mask * (1.0 / density), tensor)
+        q = density + dampening * (1.0 - density)
+        return torch.where(conflict_mask, tensor * rand_mask * (1.0 / q), tensor)
 
     @staticmethod
     def _della_sparsify_conflict(tensor, conflict_mask, density, epsilon=0.3, generator=None):
@@ -1229,6 +1233,62 @@ class _LoRAMergeBase:
 
     @staticmethod
     @torch.no_grad()
+    def _do_orthogonalize(diffs_with_weights):
+        """
+        DO-Merging: Decouple & Orthogonalize direction vectors while preserving magnitudes.
+        Reduces directional interference between LoRA diffs by applying Modified Gram-Schmidt
+        orthogonalization on unit direction vectors, then recombining with original magnitudes.
+
+        Paper: arxiv 2505.15875 (May 2025)
+        """
+        if len(diffs_with_weights) < 2:
+            return diffs_with_weights
+
+        first = diffs_with_weights[0][0]
+        if first.dim() < 2:
+            return diffs_with_weights
+
+        # Flatten, decompose into magnitude and unit direction
+        dtype = first.dtype
+        shapes = [d.shape for d, _ in diffs_with_weights]
+        flat = [d.to(dtype=torch.float32).flatten() for d, _ in diffs_with_weights]
+        weights = [w for _, w in diffs_with_weights]
+
+        magnitudes = []
+        directions = []
+        for v in flat:
+            mag = v.norm()
+            magnitudes.append(mag)
+            if mag > 1e-8:
+                directions.append(v / mag)
+            else:
+                directions.append(torch.zeros_like(v))
+        del flat
+
+        # Modified Gram-Schmidt orthogonalization (numerically stable)
+        ortho = []
+        for i, d in enumerate(directions):
+            q = d.clone()
+            for j in range(len(ortho)):
+                proj = torch.dot(q, ortho[j])
+                q = q - proj * ortho[j]
+            q_norm = q.norm()
+            if q_norm > 1e-8:
+                q = q / q_norm
+            else:
+                q = torch.zeros_like(q)
+            ortho.append(q)
+
+        # Recombine: orthogonalized direction * original magnitude
+        result = []
+        for i in range(len(diffs_with_weights)):
+            recombined = (ortho[i] * magnitudes[i]).to(dtype=dtype).reshape(shapes[i])
+            result.append((recombined, weights[i]))
+
+        return result
+
+    @staticmethod
+    @torch.no_grad()
     def _knots_align(diffs_with_weights, compute_device=None, svd_device=None):
         """
         KnOTS SVD alignment: project LoRA diffs into a shared SVD basis
@@ -1328,7 +1388,7 @@ class _LoRAMergeBase:
     def _merge_diffs(self, diffs_with_weights, mode, density=0.5, majority_sign_method="frequency",
                      compute_device=None, sparsification="disabled",
                      sparsification_density=0.7, sparsification_generator=None,
-                     merge_quality="standard"):
+                     merge_quality="standard", dare_dampening=0.0):
         """
         Merges a list of diffs with their weights.
         When compute_device is given, tensors are moved there for faster ops,
@@ -1361,29 +1421,39 @@ class _LoRAMergeBase:
                     diffs_with_weights[idx] = (diff.to(device=dev, dtype=torch.float32), weight)
                 conflict_mask = self._compute_conflict_mask(diffs_with_weights)
 
-                sparsify_fn = (self._dare_sparsify_conflict
-                               if sparsification == "dare_conflict"
+                is_dare = sparsification == "dare_conflict"
+                sparsify_fn = (self._dare_sparsify_conflict if is_dare
                                else self._della_sparsify_conflict)
                 for idx in range(len(diffs_with_weights)):
                     diff, weight = diffs_with_weights[idx]
+                    kwargs = dict(generator=sparsification_generator)
+                    if is_dare:
+                        kwargs["dampening"] = dare_dampening
                     diff = sparsify_fn(diff, conflict_mask, sparsification_density,
-                                       generator=sparsification_generator)
+                                       **kwargs)
                     diffs_with_weights[idx] = (diff.to(dtype), weight)
                 del conflict_mask
             else:
-                sparsify_fn = (self._dare_sparsify if sparsification == "dare"
+                is_dare = sparsification == "dare"
+                sparsify_fn = (self._dare_sparsify if is_dare
                                else self._della_sparsify)
                 for idx in range(len(diffs_with_weights)):
                     diff, weight = diffs_with_weights[idx]
                     diff = diff.to(device=dev, dtype=torch.float32)
+                    kwargs = dict(generator=sparsification_generator)
+                    if is_dare:
+                        kwargs["dampening"] = dare_dampening
                     diff = sparsify_fn(diff, sparsification_density,
-                                       generator=sparsification_generator)
+                                       **kwargs)
                     diffs_with_weights[idx] = (diff.to(dtype), weight)
 
         # Enhanced/maximum merge quality pipeline (non-TIES modes)
         # TIES has its own enhancement path below (after trim)
         selfish_additions = None
         if merge_quality != "standard" and len(diffs_with_weights) >= 2 and mode != "ties":
+            first = diffs_with_weights[0][0]
+            if first.dim() >= 2:
+                diffs_with_weights = self._do_orthogonalize(diffs_with_weights)
             if merge_quality == "maximum":
                 first = diffs_with_weights[0][0]
                 if first.dim() >= 2 and min(first.shape) >= 2:
@@ -1436,63 +1506,75 @@ class _LoRAMergeBase:
             return result.cpu() if to_cpu else result
 
         elif mode == "slerp":
-            # Spherical Linear Interpolation — magnitude-preserving blend for 2 diffs.
-            # result = sin((1-t)*θ)/sin(θ) * v1 + sin(t*θ)/sin(θ) * v2
-            # where θ is the angle between v1 and v2, t is derived from weights.
-            if len(diffs_with_weights) != 2:
-                # Fallback to weighted_average for != 2 diffs
-                mode = "weighted_average"
-                result = torch.zeros(ref_diff.shape, dtype=torch.float32, device=dev)
-                total_weight = sum(abs(w) for _, w in diffs_with_weights)
-                if total_weight == 0:
-                    return result.to(dtype).cpu() if to_cpu else result.to(dtype)
-                for idx in range(len(diffs_with_weights)):
-                    diff, weight = diffs_with_weights[idx]
-                    diffs_with_weights[idx] = None
-                    result.add_(diff.to(device=dev, dtype=torch.float32) * (weight / total_weight))
-                if selfish_additions is not None:
-                    result = result + selfish_additions.to(device=result.device, dtype=torch.float32)
-                result = result.to(dtype)
-                return result.cpu() if to_cpu else result
+            # Iterative pairwise SLERP — magnitude-preserving blend for N diffs.
+            # For 2 diffs: equivalent to standard SLERP.
+            # For 3+ diffs: iteratively SLERPs accumulated result with next diff,
+            # sorted by descending |weight| so strongest LoRA anchors direction.
+            # Final norm corrected to match weighted average of input norms.
+            n_diffs = len(diffs_with_weights)
 
-            d1, w1 = diffs_with_weights[0]
-            d2, w2 = diffs_with_weights[1]
-            diffs_with_weights[0] = None
-            diffs_with_weights[1] = None
-            v1 = d1.to(device=dev, dtype=torch.float32).flatten()
-            del d1
-            v2 = d2.to(device=dev, dtype=torch.float32).flatten()
-            del d2
-            # Negative weights negate the diff direction (same as TIES/weighted_avg)
-            if w1 < 0:
-                v1 = -v1
-            if w2 < 0:
-                v2 = -v2
+            # Handle negative weights by negating diff direction
+            items = []
+            for idx in range(n_diffs):
+                diff, weight = diffs_with_weights[idx]
+                diffs_with_weights[idx] = None  # Free input diff early
+                v = diff.to(device=dev, dtype=torch.float32).flatten()
+                del diff
+                if weight < 0:
+                    v = -v
+                items.append((v, abs(weight)))
 
-            # t = interpolation factor from weights (0 = all v1, 1 = all v2)
-            total_w = abs(w1) + abs(w2)
-            t = abs(w2) / total_w if total_w > 0 else 0.5
+            # Sort by descending weight (strongest LoRA anchors direction)
+            items.sort(key=lambda x: x[1], reverse=True)
 
-            # Compute angle between vectors
-            dot = torch.dot(v1, v2)
-            norm1 = v1.norm()
-            norm2 = v2.norm()
-            denom = norm1 * norm2
-            if denom > 0:
-                cos_theta = (dot / denom).clamp(-1.0, 1.0)
-            else:
-                cos_theta = torch.tensor(1.0, device=dev)
-            theta = torch.acos(cos_theta)
+            # All-zero weights: return zero (consistent with other modes)
+            total_w = sum(w for _, w in items)
+            if total_w == 0:
+                z = torch.zeros(ref_diff.shape, device=dev, dtype=dtype)
+                return z.cpu() if to_cpu else z
 
-            # If vectors are nearly parallel, fall back to linear interpolation
-            if theta.item() < 1e-6:
-                result = ((1.0 - t) * v1 + t * v2).reshape(ref_diff.shape)
-            else:
-                sin_theta = torch.sin(theta)
-                a = torch.sin((1.0 - t) * theta) / sin_theta
-                b = torch.sin(t * theta) / sin_theta
-                result = (a * v1 + b * v2).reshape(ref_diff.shape)
-            del v1, v2
+            # Pre-compute norms for later correction (before vectors are consumed)
+            input_norms = [(v.norm().item(), w) for v, w in items]
+
+            # Iterative pairwise SLERP
+            acc_v, acc_w = items[0]
+            items[0] = None  # Free tensor reference
+            for k in range(1, n_diffs):
+                next_v, next_w = items[k]
+                items[k] = None  # Free tensor reference
+                frac = next_w / (acc_w + next_w) if (acc_w + next_w) > 0 else 0.5
+
+                # Compute angle between accumulated and next vector
+                norm_acc = acc_v.norm()
+                norm_next = next_v.norm()
+                denom = norm_acc * norm_next
+                if denom > 0:
+                    cos_theta = (torch.dot(acc_v, next_v) / denom).clamp(-1.0, 1.0)
+                else:
+                    cos_theta = torch.tensor(1.0, device=dev)
+                theta = torch.acos(cos_theta)
+
+                # Nearly-parallel fallback to linear interpolation
+                if theta.item() < 1e-6:
+                    acc_v = (1.0 - frac) * acc_v + frac * next_v
+                else:
+                    sin_theta = torch.sin(theta)
+                    a = torch.sin((1.0 - frac) * theta) / sin_theta
+                    b = torch.sin(frac * theta) / sin_theta
+                    acc_v = a * acc_v + b * next_v
+
+                acc_w = acc_w + next_w
+                del next_v
+            del items
+
+            # Norm correction: rescale to match weighted average of input norms
+            target_norm = sum(n * w for n, w in input_norms) / total_w
+            current_norm = acc_v.norm().item()
+            if current_norm > 1e-8:
+                acc_v = acc_v * (target_norm / current_norm)
+
+            result = acc_v.reshape(ref_diff.shape)
+            del acc_v
             if selfish_additions is not None:
                 result = result + selfish_additions.to(device=result.device, dtype=torch.float32)
             result = result.to(dtype)
@@ -1597,12 +1679,15 @@ class _LoRAMergeBase:
                 conflict_mask = self._compute_conflict_mask(
                     [(d, 1.0) for d in signed_diffs])
 
-                sparsify_fn = (self._dare_sparsify_conflict
-                               if sparsification == "dare_conflict"
+                is_dare = sparsification == "dare_conflict"
+                sparsify_fn = (self._dare_sparsify_conflict if is_dare
                                else self._della_sparsify_conflict)
                 for d_f in signed_diffs:
+                    kwargs = dict(generator=sparsification_generator)
+                    if is_dare:
+                        kwargs["dampening"] = dare_dampening
                     trimmed.append(sparsify_fn(d_f, conflict_mask, sparsification_density,
-                                               generator=sparsification_generator))
+                                               **kwargs))
                 del signed_diffs, conflict_mask
             else:
                 for idx in range(len(diffs_with_weights)):
@@ -1614,7 +1699,7 @@ class _LoRAMergeBase:
                         d_f = -d_f
                     # DARE/DELLA replaces TIES trim step when enabled
                     if sparsification == "dare":
-                        trimmed.append(self._dare_sparsify(d_f, sparsification_density, generator=sparsification_generator))
+                        trimmed.append(self._dare_sparsify(d_f, sparsification_density, generator=sparsification_generator, dampening=dare_dampening))
                     elif sparsification == "della":
                         trimmed.append(self._della_sparsify(d_f, sparsification_density, generator=sparsification_generator))
                     else:
@@ -1626,6 +1711,9 @@ class _LoRAMergeBase:
             if merge_quality != "standard" and len(trimmed) >= 2:
                 # Re-pair trimmed diffs with abs_weights for enhancement pipeline
                 trimmed_pairs = list(zip(trimmed, abs_weights))
+                first = trimmed_pairs[0][0]
+                if first.dim() >= 2:
+                    trimmed_pairs = self._do_orthogonalize(trimmed_pairs)
                 if merge_quality == "maximum":
                     first = trimmed_pairs[0][0]
                     if first.dim() >= 2 and min(first.shape) >= 2:
@@ -1875,11 +1963,18 @@ class LoRAOptimizer(_LoRAMergeBase):
                                "At 1.0, no weights are dropped (equivalent to disabled). "
                                "Note: in TIES mode, sparsification replaces the trim step — setting density to 1.0 disables both sparsification AND trimming."
                 }),
+                "dare_dampening": ("FLOAT", {
+                    "default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05,
+                    "tooltip": "DAREx dampening: reduces the aggressiveness of DARE's rescaling factor. "
+                               "At 0.0 (default): standard DARE rescaling (1/density). "
+                               "At higher values: dampened rescaling that reduces noise amplification at low density values. "
+                               "Only affects DARE/DARE-conflict modes. Based on DAREx (ICLR 2025)."
+                }),
                 "merge_quality": (["standard", "enhanced", "maximum"], {
                     "default": "standard",
                     "tooltip": "Merge quality level. standard: element-wise conflict resolution. "
-                               "enhanced: column-wise conflict resolution + selfish weight "
-                               "protection (minimal extra compute, no extra VRAM). "
+                               "enhanced: direction orthogonalization + column-wise conflict "
+                               "resolution + selfish weight protection (minimal extra compute, no extra VRAM). "
                                "maximum: adds SVD alignment before merge (best quality, "
                                "uses more VRAM for SVD decomposition)."
                 }),
@@ -1898,7 +1993,7 @@ class LoRAOptimizer(_LoRAMergeBase):
     DESCRIPTION = "Auto-analyzes LoRA stack and selects optimal merge strategy per weight group. Outputs merged model + analysis report. Best for style/character LoRAs — apply edit, distillation (LCM/Turbo/Hyper), or DPO LoRAs via a standard Load LoRA node instead."
 
     @staticmethod
-    def _compute_cache_key(lora_stack, output_strength, clip_strength_multiplier, auto_strength, optimization_mode="per_prefix", compress_patches="non_ties", svd_device="gpu", normalize_keys="disabled", sparsification="disabled", sparsification_density=0.7, merge_strategy_override="", merge_quality="standard"):
+    def _compute_cache_key(lora_stack, output_strength, clip_strength_multiplier, auto_strength, optimization_mode="per_prefix", compress_patches="non_ties", svd_device="gpu", normalize_keys="disabled", sparsification="disabled", sparsification_density=0.7, dare_dampening=0.0, merge_strategy_override="", merge_quality="standard"):
         """
         Build a deterministic SHA-256 hash (16 hex chars) from the stack
         configuration. Used by IS_CHANGED to let ComfyUI skip re-execution
@@ -1927,7 +2022,7 @@ class LoRAOptimizer(_LoRAMergeBase):
                     entries.append((str(item.get("name", "")), float(item.get("strength", 0)), cm))
             entries.sort()
             h.update(json.dumps(entries).encode())
-        h.update(f"|os={output_strength}|csm={clip_strength_multiplier}|as={auto_strength}|om={optimization_mode}|cp={compress_patches}|sd={svd_device}|nk={normalize_keys}|sp={sparsification}|spd={sparsification_density}|mso={merge_strategy_override}|mq={merge_quality}|kf={key_filter}".encode())
+        h.update(f"|os={output_strength}|csm={clip_strength_multiplier}|as={auto_strength}|om={optimization_mode}|cp={compress_patches}|sd={svd_device}|nk={normalize_keys}|sp={sparsification}|spd={sparsification_density}|dd={dare_dampening}|mso={merge_strategy_override}|mq={merge_quality}|kf={key_filter}".encode())
         return h.hexdigest()[:16]
 
     @classmethod
@@ -1937,12 +2032,14 @@ class LoRAOptimizer(_LoRAMergeBase):
                    cache_patches="enabled", compress_patches="non_ties",
                    svd_device="gpu", normalize_keys="disabled",
                    sparsification="disabled", sparsification_density=0.7,
+                   dare_dampening=0.0,
                    merge_strategy_override="", merge_quality="standard"):
         return cls._compute_cache_key(lora_stack, output_strength,
                                       clip_strength_multiplier, auto_strength,
                                       optimization_mode, compress_patches,
                                       svd_device, normalize_keys,
                                       sparsification, sparsification_density,
+                                      dare_dampening,
                                       merge_strategy_override, merge_quality)
 
     def _save_report_to_disk(self, cache_key, lora_combo, auto_strength, report, selected_params):
@@ -2455,7 +2552,9 @@ class LoRAOptimizer(_LoRAMergeBase):
                       auto_strength_info=None, strategy_counts=None, optimization_mode="global",
                       prefix_decisions=None, detected_arch=None, normalize_keys="disabled",
                       sparsification="disabled", sparsification_density=0.7,
-                      merge_quality="standard", key_filter="all"):
+                      dare_dampening=0.0,
+                      merge_quality="standard", key_filter="all",
+                      compatibility_warnings=None):
         """Format analysis as a multi-line report string."""
         lines = []
         lines.append("=" * 50)
@@ -2478,6 +2577,15 @@ class LoRAOptimizer(_LoRAMergeBase):
 
         if key_filter != "all":
             lines.append(f"  Key filter: {key_filter}")
+            lines.append("")
+
+        if compatibility_warnings:
+            lines.append("")
+            lines.append("!!! COMPATIBILITY WARNING !!!")
+            for warn in compatibility_warnings:
+                lines.append(f"  {warn['name_i']} vs {warn['name_j']}: cosine similarity = {warn['cosine_sim']:.3f}")
+                lines.append(f"    These LoRAs work against each other and may cancel out.")
+                lines.append(f"    Consider removing one or using conflict_mode='high_conflict'")
             lines.append("")
 
         # Per-LoRA Analysis
@@ -2547,6 +2655,9 @@ class LoRAOptimizer(_LoRAMergeBase):
             }.get(sparsification, sparsification.upper())
             lines.append(f"  Sparsification: {display_name}")
             lines.append(f"  Sparsification density: {sparsification_density:.2f} (keep rate)")
+            if dare_dampening > 0 and sparsification in ("dare", "dare_conflict"):
+                q = sparsification_density + dare_dampening * (1.0 - sparsification_density)
+                lines.append(f"  DAREx dampening: {dare_dampening:.2f} (rescale factor: 1/{q:.2f} = {1.0/q:.2f}x vs standard 1/{sparsification_density:.2f} = {1.0/sparsification_density:.2f}x)")
             if optimization_mode == "per_prefix":
                 lines.append(f"  For TIES prefixes: replaces trim step; others: preprocessing")
             elif optimization_mode == "weighted_sum_only":
@@ -2558,8 +2669,8 @@ class LoRAOptimizer(_LoRAMergeBase):
 
         if merge_quality != "standard":
             quality_desc = {
-                "enhanced": "Enhanced (column-wise + TALL-masks)",
-                "maximum": "Maximum (KnOTS SVD alignment + column-wise + TALL-masks)",
+                "enhanced": "Enhanced (DO-orthogonalize + column-wise + TALL-masks)",
+                "maximum": "Maximum (DO-orthogonalize + KnOTS SVD alignment + column-wise + TALL-masks)",
             }
             lines.append(f"  Merge quality: {quality_desc.get(merge_quality, merge_quality)}")
 
@@ -2574,7 +2685,7 @@ class LoRAOptimizer(_LoRAMergeBase):
                     lines.append(f"  weighted_sum (single LoRA):      {n:>4} prefixes ({n/total_pf:.0%})")
                 if strategy_counts.get("slerp", 0) > 0:
                     n = strategy_counts["slerp"]
-                    lines.append(f"  slerp (2 LoRAs, low conflict):   {n:>4} prefixes ({n/total_pf:.0%})")
+                    lines.append(f"  slerp (low conflict):            {n:>4} prefixes ({n/total_pf:.0%})")
                 if strategy_counts.get("weighted_average", 0) > 0:
                     n = strategy_counts["weighted_average"]
                     lines.append(f"  weighted_average (low conflict):  {n:>4} prefixes ({n/total_pf:.0%})")
@@ -2661,7 +2772,7 @@ class LoRAOptimizer(_LoRAMergeBase):
         lines.append("=" * 50)
         return "\n".join(lines)
 
-    def optimize_merge(self, model, lora_stack, output_strength, clip=None, clip_strength_multiplier=1.0, auto_strength="disabled", free_vram_between_passes="disabled", optimization_mode="per_prefix", cache_patches="enabled", compress_patches="non_ties", svd_device="gpu", normalize_keys="disabled", sparsification="disabled", sparsification_density=0.7, merge_strategy_override="", merge_quality="standard"):
+    def optimize_merge(self, model, lora_stack, output_strength, clip=None, clip_strength_multiplier=1.0, auto_strength="disabled", free_vram_between_passes="disabled", optimization_mode="per_prefix", cache_patches="enabled", compress_patches="non_ties", svd_device="gpu", normalize_keys="disabled", sparsification="disabled", sparsification_density=0.7, dare_dampening=0.0, merge_strategy_override="", merge_quality="standard"):
         """
         Main entry point. Two-pass streaming architecture:
         Pass 1: Compute diffs per-prefix, sample conflicts + magnitudes, discard diffs
@@ -2723,6 +2834,7 @@ class LoRAOptimizer(_LoRAMergeBase):
                                             optimization_mode, compress_patches,
                                             svd_device, normalize_keys,
                                             sparsification, sparsification_density,
+                                            dare_dampening,
                                             merge_strategy_override, merge_quality)
         if cache_patches == "enabled" and cache_key in self._merge_cache:
             model_patches, clip_patches, report, clip_strength_out, lora_data = self._merge_cache[cache_key]
@@ -2936,6 +3048,20 @@ class LoRAOptimizer(_LoRAMergeBase):
             })
             logging.info(f"[LoRA Optimizer]   {pair_label} -> {ratio:.1%} conflict, cos_sim={cos_sim:.3f}")
 
+        # Compatibility warnings for opposing LoRAs
+        compatibility_warnings = []
+        for (i, j), cos_sim in pairwise_similarities.items():
+            if cos_sim < -0.1:
+                compatibility_warnings.append({
+                    "name_i": active_loras[i]['name'],
+                    "name_j": active_loras[j]['name'],
+                    "cosine_sim": cos_sim,
+                })
+                logging.warning(
+                    f"[LoRA Optimizer] WARNING: {active_loras[i]['name']} vs {active_loras[j]['name']} "
+                    f"have negative cosine similarity ({cos_sim:.3f}) — they work against each other"
+                )
+
         avg_conflict_ratio = total_conflict / total_overlap if total_overlap > 0 else 0
         logging.info(f"[LoRA Optimizer]   Average conflict ratio: {avg_conflict_ratio:.1%}")
 
@@ -2962,7 +3088,7 @@ class LoRAOptimizer(_LoRAMergeBase):
         # Apply merge strategy override from Conflict Editor
         # Skip when user explicitly chose weighted_sum_only (protects DPO/edit LoRAs)
         if merge_strategy_override and optimization_mode != "weighted_sum_only":
-            if merge_strategy_override in ("ties", "weighted_average", "weighted_sum", "consensus"):
+            if merge_strategy_override in ("ties", "weighted_average", "weighted_sum", "consensus", "slerp"):
                 mode = merge_strategy_override
                 reasoning.append(f"Merge mode overridden to '{mode}' by Conflict Editor")
             else:
@@ -3081,15 +3207,15 @@ class LoRAOptimizer(_LoRAMergeBase):
                         magnitude_samples=pf.get("magnitude_samples"),
                         avg_cos_sim=pf.get("avg_cos_sim", 0.0)
                     )
-                    # Upgrade weighted_average → slerp for exactly 2 LoRAs
+                    # Upgrade weighted_average → slerp for 2+ LoRAs
                     # SLERP preserves magnitude better (no cancellation from opposing vectors)
-                    if pf_mode == "weighted_average" and pf["n_loras"] == 2:
+                    if pf_mode == "weighted_average" and pf["n_loras"] >= 2:
                         pf_mode = "slerp"
 
             # Apply merge strategy override from Conflict Editor (takes priority over auto-selection)
             # Skip when user explicitly chose weighted_sum_only (protects DPO/edit LoRAs)
             if (merge_strategy_override and optimization_mode != "weighted_sum_only"
-                    and merge_strategy_override in ("ties", "weighted_average", "weighted_sum", "consensus")):
+                    and merge_strategy_override in ("ties", "weighted_average", "weighted_sum", "consensus", "slerp")):
                 pf_mode = merge_strategy_override
 
             # LOW-RANK PATH: single-LoRA weighted_sum — keep low-rank matrices
@@ -3232,6 +3358,7 @@ class LoRAOptimizer(_LoRAMergeBase):
                 sparsification_density=sparsification_density,
                 sparsification_generator=sp_gen,
                 merge_quality=merge_quality,
+                dare_dampening=dare_dampening,
             )
             diffs_list.clear()  # Free input diffs from GPU
             if merged_diff is None:
@@ -3361,8 +3488,10 @@ class LoRAOptimizer(_LoRAMergeBase):
             normalize_keys=normalize_keys,
             sparsification=sparsification,
             sparsification_density=sparsification_density,
+            dare_dampening=dare_dampening,
             merge_quality=merge_quality,
             key_filter=key_filter,
+            compatibility_warnings=compatibility_warnings,
         )
 
         # Bundle LORA_DATA for optional downstream saving
@@ -3653,12 +3782,13 @@ class LoRAConflictEditor(_LoRAMergeBase):
                 "lora_stack": ("LORA_STACK", {
                     "tooltip": "Connect a LoRA Stack node here. The editor will analyze conflicts between these LoRAs."
                 }),
-                "merge_strategy": (["auto", "ties", "consensus", "weighted_average", "weighted_sum"], {
+                "merge_strategy": (["auto", "ties", "consensus", "slerp", "weighted_average", "weighted_sum"], {
                     "default": "auto",
                     "tooltip": "Merge strategy to pass to the optimizer. "
                                "'auto': let the optimizer decide based on conflict analysis. "
                                "'ties': force TIES merging (good for high-conflict stacks). "
                                "'consensus': force Fisher-proxy + magnitude calibration + spectral cleanup (good for highly similar LoRAs). "
+                               "'slerp': force spherical interpolation (magnitude-preserving, good for low-conflict stacks). "
                                "'weighted_average': force simple averaging (good for compatible LoRAs). "
                                "'weighted_sum': force direct addition (preserves all weights exactly)."
                 }),
