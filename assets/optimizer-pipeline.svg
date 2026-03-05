@@ -1,11 +1,11 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 340">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 370">
   <defs>
     <linearGradient id="pbg" x1="0%" y1="0%" x2="100%" y2="100%">
       <stop offset="0%" style="stop-color:#0f172a"/>
       <stop offset="100%" style="stop-color:#1e1b4b"/>
     </linearGradient>
   </defs>
-  <rect width="900" height="340" rx="12" fill="url(#pbg)"/>
+  <rect width="900" height="370" rx="12" fill="url(#pbg)"/>
 
   <text x="450" y="30" font-family="Segoe UI, Arial, sans-serif" font-size="14" fill="#64ffda" text-anchor="middle" font-weight="700" letter-spacing="2">TWO-PASS STREAMING PIPELINE</text>
 
@@ -96,5 +96,17 @@
   <rect x="660" y="274" width="55" height="22" rx="11" fill="#f59e0b" opacity="0.12"/>
   <text x="687" y="289" font-family="Segoe UI, Arial, sans-serif" font-size="10" fill="#f59e0b" text-anchor="middle" font-weight="600">all</text>
 
-  <text x="450" y="324" font-family="Segoe UI, Arial, sans-serif" font-size="11" fill="#64748b" text-anchor="middle">Compatible with Flux, SDXL, SD 1.5, and all LoRA formats including LoCon</text>
+  <!-- Merge quality tags -->
+  <rect x="175" y="304" width="120" height="22" rx="11" fill="#a78bfa" opacity="0.12"/>
+  <text x="235" y="319" font-family="Segoe UI, Arial, sans-serif" font-size="10" fill="#a78bfa" text-anchor="middle" font-weight="600">standard (default)</text>
+
+  <rect x="305" y="304" width="100" height="22" rx="11" fill="#38bdf8" opacity="0.12"/>
+  <text x="355" y="319" font-family="Segoe UI, Arial, sans-serif" font-size="10" fill="#38bdf8" text-anchor="middle" font-weight="600">enhanced</text>
+
+  <rect x="415" y="304" width="100" height="22" rx="11" fill="#f59e0b" opacity="0.12"/>
+  <text x="465" y="319" font-family="Segoe UI, Arial, sans-serif" font-size="10" fill="#f59e0b" text-anchor="middle" font-weight="600">maximum</text>
+
+  <text x="600" y="319" font-family="Segoe UI, Arial, sans-serif" font-size="10" fill="#64748b" text-anchor="middle">merge_quality</text>
+
+  <text x="450" y="354" font-family="Segoe UI, Arial, sans-serif" font-size="11" fill="#64748b" text-anchor="middle">Compatible with Flux, SDXL, SD 1.5, and all LoRA formats including LoCon</text>
 </svg>

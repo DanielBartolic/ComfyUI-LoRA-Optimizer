@@ -7,6 +7,7 @@
   <img src="https://img.shields.io/badge/TIES_Merging-NeurIPS_2023-8b5cf6?style=flat-square" alt="TIES">
   <img src="https://img.shields.io/badge/DARE_%7C_DELLA-Sparsification-f59e0b?style=flat-square" alt="DARE/DELLA">
   <img src="https://img.shields.io/badge/Per--Prefix_Adaptive-Merge-e94560?style=flat-square" alt="Per-Prefix">
+  <img src="https://img.shields.io/badge/KnOTS_%7C_Column--wise_%7C_TALL--masks-Merge_Quality-a78bfa?style=flat-square" alt="Merge Quality">
   <img src="https://img.shields.io/badge/SVD_Patch-Compression-64ffda?style=flat-square" alt="SVD">
   <img src="https://img.shields.io/badge/Architecture--Aware-Key_Normalization-22c55e?style=flat-square" alt="Key Normalization">
   <img src="https://img.shields.io/badge/Flux_%7C_SDXL_%7C_Wan_%7C_LTX_%7C_Z--Image-Compatible-22c55e?style=flat-square" alt="Compatible">
@@ -15,7 +16,7 @@
 
 ---
 
-A ComfyUI node that **automatically analyzes your LoRA stack** and selects the best merge strategy per weight group — diff-based merging, TIES conflict resolution, DARE/DELLA sparsification, per-prefix adaptive decisions, SVD patch compression, architecture-aware key normalization, and auto-tuned parameters. Two nodes: **LoRA Stack** (build input) and **LoRA Optimizer** (analyze + merge).
+A ComfyUI node that **automatically analyzes your LoRA stack** and selects the best merge strategy per weight group — diff-based merging, TIES conflict resolution, DARE/DELLA sparsification, per-prefix adaptive decisions, SVD patch compression, architecture-aware key normalization, enhanced merge quality (KnOTS alignment, column-wise voting, TALL-mask protection), and auto-tuned parameters. Two nodes: **LoRA Stack** (build input) and **LoRA Optimizer** (analyze + merge).
 
 ## The Problem
 
@@ -141,6 +142,37 @@ DARE and DELLA **sparsify each LoRA's diff before merging**, reducing parameter 
 </details>
 
 <details>
+<summary><b>Merge Quality (Enhanced / Maximum)</b></summary>
+
+Three quality levels for merge conflict resolution, selectable via the `merge_quality` dropdown:
+
+<p align="center"><img src="assets/merge-quality-diagram.svg" alt="Merge Quality Pipeline" width="100%"></p>
+
+| Level | What It Adds | Cost |
+|-------|-------------|------|
+| **standard** (default) | Current behavior — element-wise sign voting and merge | Baseline |
+| **enhanced** | Column-wise conflict resolution + TALL-mask selfish weight protection | Minimal extra compute, no extra VRAM |
+| **maximum** | KnOTS SVD alignment + column-wise + TALL-masks | More VRAM for SVD decomposition |
+
+**Column-wise conflict resolution** (enhanced+): Instead of each weight position voting independently on sign direction, entire output neurons (rows) vote as a unit. This preserves structural coherence — a neuron's weights work together, so their signs should be resolved together.
+
+**TALL-masks** (enhanced+): Identifies "selfish" weights — positions where one LoRA dominates and others contribute little. These weights are separated from the consensus merge and added back afterward, protecting each LoRA's unique features from being averaged away.
+
+**KnOTS SVD alignment** (maximum): Projects all LoRA diffs into a shared singular value basis via truncated SVD before merging. This makes diffs more directly comparable by aligning their representation spaces. Falls back to CPU on GPU OOM, skips gracefully if both fail.
+
+**Interaction with other settings:**
+- Works with all merge modes (TIES, weighted_average, SLERP, etc.)
+- Combines with DARE/DELLA sparsification — sparsification runs first, then quality enhancements
+- Best combination: `maximum` + `della_conflict` (or `dare_conflict`) for full pipeline
+- Single-LoRA prefixes: all enhancements short-circuit (no work to do)
+
+| Setting | Default | Options |
+|---------|---------|---------|
+| `merge_quality` | standard | `standard`, `enhanced`, `maximum` |
+
+</details>
+
+<details>
 <summary><b>Auto-Strength</b></summary>
 
 When `auto_strength` is set to `enabled`, the optimizer automatically reduces per-LoRA strengths before merging to prevent overexposure from stacking. This is especially useful on distilled/turbo models where 2+ LoRAs at full strength cause blown-out results even with optimal merge mode selection.
@@ -249,7 +281,7 @@ The analysis report includes a visual block-by-block map showing what strategy w
 
 #### Inputs / Outputs
 
-**Inputs:** `MODEL`, `CLIP` (optional), `LORA_STACK`, output strength, clip strength multiplier, auto strength, optimization mode, cache patches, compress patches, SVD device, free VRAM between passes, normalize keys, sparsification, sparsification density.
+**Inputs:** `MODEL`, `CLIP` (optional), `LORA_STACK`, output strength, clip strength multiplier, auto strength, optimization mode, merge quality, cache patches, compress patches, SVD device, free VRAM between passes, normalize keys, sparsification, sparsification density.
 
 **Outputs:** `MODEL`, `CLIP`, `STRING` (analysis report), `LORA_DATA` (for Save Merged LoRA / Merged LoRA to Hook)
 
@@ -405,7 +437,7 @@ The `prev_hooks` input allows chaining multiple hook sources together.
 
 Variant of the LoRA Optimizer for **WanVideo models** (via [kijai's WanVideoWrapper](https://github.com/kijai/ComfyUI-WanVideoWrapper)). Accepts `WANVIDEOMODEL` instead of `MODEL`, skips CLIP, and applies merged patches in-memory.
 
-All merging algorithms are inherited — TIES, DARE/DELLA, SVD compression, auto-strength, per-prefix adaptive merge, and Wan key normalization (LyCORIS, diffusers, Fun LoRA, finetrainer, RS-LoRA) all work identically.
+All merging algorithms are inherited — TIES, DARE/DELLA, SVD compression, auto-strength, per-prefix adaptive merge, merge quality enhancements (KnOTS, column-wise, TALL-masks), and Wan key normalization (LyCORIS, diffusers, Fun LoRA, finetrainer, RS-LoRA) all work identically.
 
 **Inputs:** `WANVIDEOMODEL`, `LORA_STACK`, output strength, and all optimizer options (except CLIP-related ones). Defaults: `normalize_keys=enabled`, `cache_patches=disabled`.
 
@@ -471,6 +503,9 @@ Restart ComfyUI. Nodes appear under the `loaders` category.
 - TIES-Merging: [Yadav et al., NeurIPS 2023](https://arxiv.org/abs/2306.01708)
 - DARE: [Yu et al., ICML 2024](https://arxiv.org/abs/2311.03099) — Drop And REscale for language model merging
 - DELLA: [Deep et al., 2024](https://arxiv.org/abs/2406.11617) — magnitude-aware sparsification
+- KnOTS: [Ramé et al., 2024](https://arxiv.org/abs/2407.09095) — SVD alignment for model merging
+- TALL-masks: [Wang et al., 2024](https://arxiv.org/abs/2406.12832) — selfish weight protection via task-aware masks
+- Column-wise merging inspired by ZipLoRA: [Shah et al., 2025](https://arxiv.org/abs/2311.13600) — structural sparsity for LoRA merging
 
 </details>
 

@@ -1749,7 +1749,7 @@ class LoRAOptimizer(_LoRAMergeBase):
                 }),
                 "merge_quality": (["standard", "enhanced", "maximum"], {
                     "default": "standard",
-                    "tooltip": "Merge quality level. standard: current behavior. "
+                    "tooltip": "Merge quality level. standard: element-wise conflict resolution. "
                                "enhanced: column-wise conflict resolution + selfish weight "
                                "protection (minimal extra compute, no extra VRAM). "
                                "maximum: adds SVD alignment before merge (best quality, "
