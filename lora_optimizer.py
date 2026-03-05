@@ -1076,6 +1076,38 @@ class _LoRAMergeBase:
         return torch.where(conflict_mask, della_result, tensor)
 
     @staticmethod
+    def _estimate_patch_memory(patches_dict):
+        """Estimate total bytes used by patch tensors in an add_patches-style dict."""
+        total = 0
+        for v in patches_dict.values():
+            # LoRAAdapter: namedtuple wrapping (set, (mat_up, mat_down, alpha, ...))
+            # diff patch:  ("diff", (tensor,))
+            data = v.data if hasattr(v, 'data') else v
+            if isinstance(data, (tuple, list)):
+                for item in data:
+                    if isinstance(item, torch.Tensor):
+                        total += item.nelement() * item.element_size()
+                    elif isinstance(item, (tuple, list)):
+                        for sub in item:
+                            if isinstance(sub, torch.Tensor):
+                                total += sub.nelement() * sub.element_size()
+        return total
+
+    @staticmethod
+    def _update_model_size(patcher, patches_dict):
+        """Update a ModelPatcher's reported size to include patch memory.
+
+        ComfyUI's model_size() only counts base model weights, making patches
+        invisible to the memory manager. This causes large patched models to
+        never be evicted when other models need RAM. By updating the cached
+        size, ComfyUI's eviction logic sees the true memory footprint.
+        """
+        patch_bytes = _LoRAMergeBase._estimate_patch_memory(patches_dict)
+        if patch_bytes > 0:
+            patcher.size = patcher.model_size() + patch_bytes
+            logging.debug(f"[LoRA Optimizer] Updated model size: +{patch_bytes / (1024**2):.0f}MB patches")
+
+    @staticmethod
     def _ties_elect_sign(trimmed_diffs, method="frequency"):
         """
         TIES Step 2: Elect Sign — determine majority sign direction per weight position.
@@ -2843,9 +2875,11 @@ class LoRAOptimizer(_LoRAMergeBase):
             if model is not None and len(model_patches) > 0:
                 new_model = model.clone()
                 new_model.add_patches(model_patches, output_strength)
+                self._update_model_size(new_model, model_patches)
             if clip is not None and len(clip_patches) > 0:
                 new_clip = clip.clone()
                 new_clip.add_patches(clip_patches, clip_strength_out)
+                self._update_model_size(new_clip, clip_patches)
             logging.info(f"[LoRA Optimizer] Using cached merge result ({len(model_patches)} model + {len(clip_patches)} CLIP patches)")
             return (new_model, new_clip, report, lora_data)
 
@@ -3463,10 +3497,12 @@ class LoRAOptimizer(_LoRAMergeBase):
         if model is not None and len(model_patches) > 0:
             new_model = model.clone()
             new_model.add_patches(model_patches, output_strength)
+            self._update_model_size(new_model, model_patches)
 
         if clip is not None and len(clip_patches) > 0:
             new_clip = clip.clone()
             new_clip.add_patches(clip_patches, clip_strength_out)
+            self._update_model_size(new_clip, clip_patches)
 
         merge_summary = {
             "keys_processed": processed_keys,
