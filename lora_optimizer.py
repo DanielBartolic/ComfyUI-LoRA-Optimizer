@@ -4396,6 +4396,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "SaveMergedLoRA": "Save Merged LoRA",
     "LoRAConflictEditor": "LoRA Conflict Editor",
     "MergedLoRAToHook": "Merged LoRA to Hook",
-    "MergedLoRAToWanVideo": "Merged LoRA → WanVideo",
-    "WanVideoLoRAOptimizer": "WanVideo LoRA Optimizer",
+    "MergedLoRAToWanVideo": "(WIP) Merged LoRA → WanVideo",
+    "WanVideoLoRAOptimizer": "(WIP) WanVideo LoRA Optimizer",
 }
