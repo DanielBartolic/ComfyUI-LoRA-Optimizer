@@ -4156,8 +4156,8 @@ class LoRAAutoTuner(LoRAOptimizer):
             },
         }
 
-    RETURN_TYPES = ("MODEL", "CLIP", "STRING", "TUNER_DATA")
-    RETURN_NAMES = ("model", "clip", "report", "tuner_data")
+    RETURN_TYPES = ("MODEL", "CLIP", "STRING", "TUNER_DATA", "LORA_DATA")
+    RETURN_NAMES = ("model", "clip", "report", "tuner_data", "lora_data")
     FUNCTION = "auto_tune"
     OUTPUT_NODE = True
     CATEGORY = "LoRA Optimizer"
@@ -4177,18 +4177,18 @@ class LoRAAutoTuner(LoRAOptimizer):
         normalized_stack = self._normalize_stack(lora_stack, normalize_keys=normalize_keys)
         active_loras = [item for item in normalized_stack if item["strength"] != 0]
         if not active_loras:
-            return (model, clip, "No active LoRAs in stack.", None)
+            return (model, clip, "No active LoRAs in stack.", None, None)
 
         if len(active_loras) == 1:
             # Single LoRA: nothing to tune, delegate directly
-            merged_model, merged_clip, report, _ = super().optimize_merge(
+            merged_model, merged_clip, report, lora_data = super().optimize_merge(
                 model, lora_stack, output_strength,
                 clip=clip, clip_strength_multiplier=clip_strength_multiplier,
                 normalize_keys=normalize_keys, behavior_profile="v1.2",
                 architecture_preset=architecture_preset,
             )
             return (merged_model, merged_clip,
-                    "Single LoRA detected -- no parameters to tune.\n\n" + report, None)
+                    "Single LoRA detected -- no parameters to tune.\n\n" + report, None, lora_data)
 
         # Compute lora_hash for cache validation
         hash_input = json.dumps([(l["name"], l["strength"]) for l in active_loras],
@@ -4215,7 +4215,7 @@ class LoRAAutoTuner(LoRAOptimizer):
         all_lora_prefixes = sorted(all_lora_prefixes)
 
         if not all_lora_prefixes:
-            return (model, clip, "No LoRA prefixes found.", None)
+            return (model, clip, "No LoRA prefixes found.", None, None)
 
         # Determine compute device
         compute_device = self._get_compute_device()
@@ -4302,7 +4302,7 @@ class LoRAAutoTuner(LoRAOptimizer):
                     pbar.update(1)
 
         if prefix_count == 0:
-            return (model, clip, "No compatible LoRA keys found.", None)
+            return (model, clip, "No compatible LoRA keys found.", None, None)
 
         t_analysis = time.time() - t_start
         logging.info(f"[LoRA AutoTuner] Analysis complete: {prefix_count} prefixes ({t_analysis:.1f}s)")
@@ -4505,6 +4505,7 @@ class LoRAAutoTuner(LoRAOptimizer):
         # Extract return values, then free heavy intermediates
         ret_model = best["merged_model"]
         ret_clip = best["merged_clip"]
+        ret_lora_data = best.get("lora_data")
         for r in results:
             r.pop("merged_model", None)
             r.pop("merged_clip", None)
@@ -4514,7 +4515,7 @@ class LoRAAutoTuner(LoRAOptimizer):
         if use_gpu:
             torch.cuda.empty_cache()
 
-        return (ret_model, ret_clip, report, tuner_data)
+        return (ret_model, ret_clip, report, tuner_data, ret_lora_data)
 
     def _save_tuner_dataset_entry(self, tuner_data, active_loras, prefix_stats,
                                   detected_arch):
@@ -4676,8 +4677,8 @@ class LoRAMergeSelector(LoRAOptimizer):
             },
         }
 
-    RETURN_TYPES = ("MODEL", "CLIP", "STRING")
-    RETURN_NAMES = ("model", "clip", "report")
+    RETURN_TYPES = ("MODEL", "CLIP", "STRING", "LORA_DATA")
+    RETURN_NAMES = ("model", "clip", "report", "lora_data")
     FUNCTION = "select_merge"
     OUTPUT_NODE = True
     CATEGORY = "LoRA Optimizer"
@@ -4691,7 +4692,7 @@ class LoRAMergeSelector(LoRAOptimizer):
         import hashlib, json
 
         if tuner_data is None or "top_n" not in tuner_data:
-            return (model, clip, "Error: No valid TUNER_DATA provided.")
+            return (model, clip, "Error: No valid TUNER_DATA provided.", None)
 
         # Validate lora_hash (filter zero-strength to match AutoTuner)
         nk = tuner_data.get("normalize_keys", "disabled")
@@ -4708,7 +4709,7 @@ class LoRAMergeSelector(LoRAOptimizer):
         top_n = tuner_data["top_n"]
         if selection < 1 or selection > len(top_n):
             return (model, clip,
-                    f"Error: selection={selection} out of range (1-{len(top_n)}).")
+                    f"Error: selection={selection} out of range (1-{len(top_n)}).", None)
 
         entry = top_n[selection - 1]
         config = entry["config"]
@@ -4750,7 +4751,7 @@ class LoRAMergeSelector(LoRAOptimizer):
                      f"| Measured score: {entry['score_measured']:.3f}")
         report = "\n".join(lines)
 
-        return (merged_model, merged_clip, report)
+        return (merged_model, merged_clip, report, _lora_data)
 
     @classmethod
     def IS_CHANGED(cls, model, lora_stack, tuner_data, selection,
