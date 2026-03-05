@@ -4078,13 +4078,17 @@ class LoRAAutoTuner(LoRAOptimizer):
 
         logging.info(f"[LoRA AutoTuner] Pass 1: Analyzing {len(all_lora_prefixes)} prefixes...")
         t_start = time.time()
+        # Progress bar: analysis prefixes + top_n merges
+        pbar = comfy.utils.ProgressBar(len(all_lora_prefixes) + top_n)
         if use_gpu:
             for lora_prefix in all_lora_prefixes:
                 result = self._analyze_prefix(lora_prefix, active_loras,
                                               model_keys, clip_keys, model, clip, compute_device)
                 _collect_analysis(result)
+                pbar.update(1)
         else:
             max_workers = min(4, max(1, len(all_lora_prefixes)))
+            analyzed = 0
             with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
                 futures = {
                     executor.submit(self._analyze_prefix, lora_prefix, active_loras,
@@ -4093,6 +4097,8 @@ class LoRAAutoTuner(LoRAOptimizer):
                 }
                 for future in concurrent.futures.as_completed(futures):
                     _collect_analysis(future.result())
+                    analyzed += 1
+                    pbar.update(1)
 
         if prefix_count == 0:
             return (model, clip, "No compatible LoRA keys found.", None)
@@ -4134,15 +4140,24 @@ class LoRAAutoTuner(LoRAOptimizer):
                 magnitude_ratio, prefix_stats)
             scored.append((h_score, config))
         scored.sort(key=lambda x: x[0], reverse=True)
-        logging.info(f"[LoRA AutoTuner] Scored {len(grid)} combos, top heuristic: {scored[0][0]:.3f}")
+        logging.info(f"[LoRA AutoTuner] Scored {len(grid)} combos in {time.time() - t_start:.1f}s")
+        for i in range(min(5, len(scored))):
+            c = scored[i][1]
+            logging.info(f"[LoRA AutoTuner]   #{i+1} heuristic={scored[i][0]:.3f}: "
+                         f"{c['merge_mode']}/{c['merge_quality']}"
+                         f"{' +' + c['sparsification'] if c['sparsification'] != 'disabled' else ''}"
+                         f" auto_str={c['auto_strength']} {c['optimization_mode']}")
 
         # --- Phase 2: Merge top-N and measure ---
         top_candidates = scored[:top_n]
         results = []
+        logging.info(f"[LoRA AutoTuner] Phase 2: Merging and measuring top {len(top_candidates)} candidates...")
 
         for rank_idx, (h_score, config) in enumerate(top_candidates):
-            logging.info(f"[LoRA AutoTuner] Phase 2: Merging candidate #{rank_idx + 1} "
-                         f"({config['merge_mode']}, {config['merge_quality']})...")
+            logging.info(f"[LoRA AutoTuner]   Candidate {rank_idx + 1}/{len(top_candidates)}: "
+                         f"{config['merge_mode']}, {config['merge_quality']}"
+                         f"{', ' + config['sparsification'] if config['sparsification'] != 'disabled' else ''}"
+                         f" (heuristic={h_score:.3f})...")
             t_merge = time.time()
 
             merged_model, merged_clip, _report, lora_data = super().optimize_merge(
@@ -4173,6 +4188,7 @@ class LoRAAutoTuner(LoRAOptimizer):
             t_elapsed = time.time() - t_merge
             logging.info(f"[LoRA AutoTuner]   Candidate #{rank_idx + 1}: "
                          f"measured={measured['composite_score']:.3f} ({t_elapsed:.1f}s)")
+            pbar.update(1)
 
             results.append({
                 "rank": rank_idx + 1,
