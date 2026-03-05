@@ -2998,8 +2998,10 @@ class LoRAOptimizer(_LoRAMergeBase):
         if mode == "ties":
             if magnitude_samples is not None:
                 density = self._estimate_density_from_samples(magnitude_samples, arch_preset=arch_preset)
-            else:
+            elif all_key_diffs is not None:
                 density = self._estimate_density(all_key_diffs, arch_preset=arch_preset)
+            else:
+                density = 0.5
             reasoning.append(f"Auto-density estimated at {density:.2f} from magnitude distribution")
         else:
             density = 0.5  # unused but set for completeness
@@ -4737,7 +4739,8 @@ class LoRAAutoTuner(LoRAOptimizer):
     def IS_CHANGED(cls, model, lora_stack, output_strength, clip=None,
                    clip_strength_multiplier=1.0, top_n=3, normalize_keys="disabled",
                    scoring_svd="disabled", scoring_device="gpu",
-                   architecture_preset="auto", record_dataset="disabled"):
+                   architecture_preset="auto", record_dataset="disabled",
+                   vram_budget=0.0):
         return (id(lora_stack), output_strength, clip_strength_multiplier, top_n,
                 normalize_keys, scoring_svd, scoring_device, architecture_preset)
 
