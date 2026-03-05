@@ -1091,6 +1091,31 @@ class _LoRAMergeBase:
         return majority_sign
 
     @staticmethod
+    def _columnwise_elect_sign(trimmed_diffs, method="frequency"):
+        """
+        Column-wise sign election: each output neuron (row) votes as a unit
+        instead of each element voting independently. For Conv2d tensors,
+        [c_out, c_in, kH, kW] is reshaped to [c_out, -1] so each output
+        channel votes together.
+
+        Falls back to element-wise for 1D tensors (biases, norms).
+        """
+        ref = trimmed_diffs[0]
+        if ref.dim() < 2:
+            return _LoRAMergeBase._ties_elect_sign(trimmed_diffs, method)
+
+        out_dim = ref.shape[0]
+        total = torch.zeros(out_dim, device=ref.device, dtype=torch.float32)
+        for d in trimmed_diffs:
+            row_vals = d.reshape(out_dim, -1).to(dtype=torch.float32)
+            if method == "total":
+                total.add_(row_vals.sum(dim=1))
+            else:
+                total.add_(row_vals.sum(dim=1).sign())
+        majority = torch.where(total >= 0, 1.0, -1.0)
+        return majority.reshape(-1, *([1] * (ref.dim() - 1))).expand_as(ref)
+
+    @staticmethod
     def _ties_disjoint_merge(trimmed_diffs, weights, majority_sign):
         """
         TIES Step 3: Disjoint Merge — average only contributors that agree
@@ -1118,6 +1143,137 @@ class _LoRAMergeBase:
         # Average by number of contributors (avoid div-by-zero)
         contributor_count.clamp_(min=1.0)
         return result.div_(contributor_count)
+
+    @staticmethod
+    def _columnwise_disjoint_merge(trimmed_diffs, weights, majority_sign):
+        """
+        Column-wise disjoint merge: a row contributes entirely if its dominant
+        sign matches the majority. Falls back to element-wise for 1D tensors.
+        """
+        ref = trimmed_diffs[0]
+        if ref.dim() < 2:
+            return _LoRAMergeBase._ties_disjoint_merge(trimmed_diffs, weights, majority_sign)
+
+        out_dim = ref.shape[0]
+        row_majority = majority_sign.reshape(out_dim, -1)[:, 0]
+
+        result = torch.zeros_like(ref, dtype=torch.float32)
+        contributor_count = torch.zeros(out_dim, device=ref.device, dtype=torch.float32)
+
+        for diff, weight in zip(trimmed_diffs, weights):
+            diff_f = diff.to(dtype=torch.float32)
+            row_sign = diff_f.reshape(out_dim, -1).sum(dim=1).sign()
+            sign_match = (row_sign * row_majority) > 0
+            mask = sign_match.reshape(-1, *([1] * (ref.dim() - 1))).expand_as(ref)
+            result.add_(torch.where(mask, diff_f * weight, torch.zeros_like(diff_f)))
+            contributor_count.add_(sign_match.float())
+
+        contributor_count.clamp_(min=1.0)
+        return result.div_(contributor_count.reshape(-1, *([1] * (ref.dim() - 1))))
+
+    @staticmethod
+    @torch.no_grad()
+    def _tall_masks(diffs_with_weights, lambda_threshold=1.0):
+        """
+        TALL-masks: identify per-parameter importance. "Selfish" weights
+        (important to only one LoRA) are protected from merge averaging.
+        Returns (consensus_diffs, selfish_additions) where selfish_additions
+        is a tensor to add back after merging, or None if no selfish weights.
+        """
+        if len(diffs_with_weights) < 2:
+            return diffs_with_weights, None
+
+        ref = diffs_with_weights[0][0]
+
+        # Tentative weighted sum
+        d_merged = torch.zeros_like(ref, dtype=torch.float32)
+        for d, w in diffs_with_weights:
+            d_merged.add_(d.to(dtype=torch.float32) * w)
+
+        # Per-LoRA importance masks
+        masks = []
+        for d, w in diffs_with_weights:
+            contribution = d.to(dtype=torch.float32) * w
+            others = d_merged - contribution
+            mask = contribution.abs() >= others.abs() * lambda_threshold
+            masks.append(mask)
+
+        # Agreement count per position
+        agreement = torch.zeros_like(ref, dtype=torch.float32)
+        for m in masks:
+            agreement.add_(m.float())
+
+        # Separate selfish (agreement==1) from consensus
+        selfish_additions = torch.zeros_like(ref, dtype=torch.float32)
+        consensus_diffs = []
+        has_selfish = False
+        for i, (d, w) in enumerate(diffs_with_weights):
+            selfish_mask = masks[i] & (agreement == 1)
+            if selfish_mask.any():
+                selfish_additions.add_(d.to(dtype=torch.float32) * w * selfish_mask.float())
+                has_selfish = True
+            consensus_d = d.clone()
+            consensus_d[selfish_mask] = 0
+            consensus_diffs.append((consensus_d, w))
+
+        return consensus_diffs, selfish_additions if has_selfish else None
+
+    @staticmethod
+    @torch.no_grad()
+    def _knots_align(diffs_with_weights, compute_device=None, svd_device=None):
+        """
+        KnOTS SVD alignment: project LoRA diffs into a shared SVD basis
+        for better comparability before merging. Concatenates all diffs
+        column-wise, computes truncated SVD, then reconstructs each diff
+        in the shared basis.
+
+        For [4096, 4096] with 5 LoRAs → M is [4096, 20480] ≈ 320MB.
+        SVD rank capped at 256. Falls back to CPU on OOM.
+        """
+        if len(diffs_with_weights) < 2:
+            return diffs_with_weights
+
+        ref = diffs_with_weights[0][0]
+        if ref.dim() < 2 or min(ref.shape) < 2:
+            return diffs_with_weights
+
+        n = len(diffs_with_weights)
+        out_dim = ref.shape[0]
+        in_dim = ref.reshape(out_dim, -1).shape[1]
+        original_shape = ref.shape
+        dev = svd_device if svd_device is not None else (compute_device or ref.device)
+
+        # Concatenate column-wise: [out, N*in]
+        cols = [d.reshape(out_dim, -1).to(device=dev, dtype=torch.float32)
+                for d, _ in diffs_with_weights]
+        M = torch.cat(cols, dim=1)
+        del cols
+
+        rank = min(out_dim, n * in_dim, 256)
+        try:
+            U, S, V = torch.svd_lowrank(M, q=rank)
+        except (torch.cuda.OutOfMemoryError, RuntimeError):
+            if M.is_cuda:
+                logging.warning("[LoRA Optimizer] KnOTS SVD OOM on GPU, falling back to CPU")
+                torch.cuda.empty_cache()
+                M = M.cpu()
+                U, S, V = torch.svd_lowrank(M, q=rank)
+            else:
+                return diffs_with_weights
+        del M
+
+        # Reconstruct each diff in shared basis
+        aligned = []
+        US = U * S.unsqueeze(0)  # [out, rank]
+        for i, (_, w) in enumerate(diffs_with_weights):
+            Vi = V[i * in_dim:(i + 1) * in_dim, :]  # [in, rank]
+            aligned_diff = (US @ Vi.T).reshape(original_shape)
+            if compute_device is not None:
+                aligned_diff = aligned_diff.to(compute_device)
+            aligned.append((aligned_diff, w))
+        del U, S, V, US
+
+        return aligned
 
     @staticmethod
     @torch.no_grad()
@@ -1153,7 +1309,8 @@ class _LoRAMergeBase:
     @torch.no_grad()
     def _merge_diffs(self, diffs_with_weights, mode, density=0.5, majority_sign_method="frequency",
                      compute_device=None, sparsification="disabled",
-                     sparsification_density=0.7, sparsification_generator=None):
+                     sparsification_density=0.7, sparsification_generator=None,
+                     merge_quality="standard"):
         """
         Merges a list of diffs with their weights.
         When compute_device is given, tensors are moved there for faster ops,
@@ -1205,6 +1362,17 @@ class _LoRAMergeBase:
                                        generator=sparsification_generator)
                     diffs_with_weights[idx] = (diff.to(dtype), weight)
 
+        # Enhanced/maximum merge quality pipeline (non-TIES modes)
+        # TIES has its own enhancement path below (after trim)
+        selfish_additions = None
+        if merge_quality != "standard" and len(diffs_with_weights) >= 2 and mode != "ties":
+            if merge_quality == "maximum":
+                first = diffs_with_weights[0][0]
+                if first.dim() >= 2 and min(first.shape) >= 2:
+                    diffs_with_weights = self._knots_align(
+                        diffs_with_weights, compute_device=dev, svd_device=dev)
+            diffs_with_weights, selfish_additions = self._tall_masks(diffs_with_weights)
+
         if mode == "weighted_average":
             result = torch.zeros(ref_diff.shape, dtype=torch.float32, device=dev)
             total_weight = sum(abs(w) for _, w in diffs_with_weights)
@@ -1214,6 +1382,8 @@ class _LoRAMergeBase:
                 diff, weight = diffs_with_weights[idx]
                 diffs_with_weights[idx] = None  # Free input diff early
                 result.add_(diff.to(device=dev, dtype=torch.float32) * (weight / total_weight))
+            if selfish_additions is not None:
+                result = result + selfish_additions.to(device=result.device, dtype=torch.float32)
             result = result.to(dtype)
             return result.cpu() if to_cpu else result
 
@@ -1223,6 +1393,8 @@ class _LoRAMergeBase:
                 diff, weight = diffs_with_weights[idx]
                 diffs_with_weights[idx] = None  # Free input diff early
                 result.add_(diff.to(device=dev, dtype=torch.float32) * weight)
+            if selfish_additions is not None:
+                result = result + selfish_additions.to(device=result.device, dtype=torch.float32)
             result = result.to(dtype)
             return result.cpu() if to_cpu else result
 
@@ -1240,6 +1412,8 @@ class _LoRAMergeBase:
                 diff, weight = diffs_with_weights[idx]
                 diffs_with_weights[idx] = None  # Free input diff early
                 result.add_(diff.to(device=dev, dtype=torch.float32) * weight * scale)
+            if selfish_additions is not None:
+                result = result + selfish_additions.to(device=result.device, dtype=torch.float32)
             result = result.to(dtype)
             return result.cpu() if to_cpu else result
 
@@ -1258,6 +1432,8 @@ class _LoRAMergeBase:
                     diff, weight = diffs_with_weights[idx]
                     diffs_with_weights[idx] = None
                     result.add_(diff.to(device=dev, dtype=torch.float32) * (weight / total_weight))
+                if selfish_additions is not None:
+                    result = result + selfish_additions.to(device=result.device, dtype=torch.float32)
                 result = result.to(dtype)
                 return result.cpu() if to_cpu else result
 
@@ -1299,6 +1475,8 @@ class _LoRAMergeBase:
                 b = torch.sin(t * theta) / sin_theta
                 result = (a * v1 + b * v2).reshape(ref_diff.shape)
             del v1, v2
+            if selfish_additions is not None:
+                result = result + selfish_additions.to(device=result.device, dtype=torch.float32)
             result = result.to(dtype)
             return result.cpu() if to_cpu else result
 
@@ -1350,12 +1528,35 @@ class _LoRAMergeBase:
                         trimmed.append(self._ties_trim(d_f, density))
                     abs_weights.append(abs(w))
 
+            # Enhanced/maximum merge quality pipeline for TIES
+            ties_selfish = None
+            if merge_quality != "standard" and len(trimmed) >= 2:
+                # Re-pair trimmed diffs with abs_weights for enhancement pipeline
+                trimmed_pairs = list(zip(trimmed, abs_weights))
+                if merge_quality == "maximum":
+                    first = trimmed_pairs[0][0]
+                    if first.dim() >= 2 and min(first.shape) >= 2:
+                        trimmed_pairs = self._knots_align(
+                            trimmed_pairs, compute_device=dev, svd_device=dev)
+                trimmed_pairs, ties_selfish = self._tall_masks(trimmed_pairs)
+                trimmed = [d for d, _ in trimmed_pairs]
+                abs_weights = [w for _, w in trimmed_pairs]
+                del trimmed_pairs
+
             # Step 2: Elect majority sign
-            majority_sign = self._ties_elect_sign(trimmed, majority_sign_method)
+            if merge_quality != "standard":
+                majority_sign = self._columnwise_elect_sign(trimmed, majority_sign_method)
+            else:
+                majority_sign = self._ties_elect_sign(trimmed, majority_sign_method)
 
             # Step 3: Disjoint merge
-            result = self._ties_disjoint_merge(trimmed, abs_weights, majority_sign)
+            if merge_quality != "standard":
+                result = self._columnwise_disjoint_merge(trimmed, abs_weights, majority_sign)
+            else:
+                result = self._ties_disjoint_merge(trimmed, abs_weights, majority_sign)
             del trimmed, majority_sign
+            if ties_selfish is not None:
+                result = result.to(dtype=torch.float32) + ties_selfish.to(device=result.device, dtype=torch.float32)
             result = result.to(dtype)
             return result.cpu() if to_cpu else result
 
@@ -1496,8 +1697,8 @@ class LoRAOptimizer(_LoRAMergeBase):
                 "clip": ("CLIP", {"tooltip": "The text encoder. Connect this so LoRAs can also affect how your prompts are understood. Leave empty for video models that don't use CLIP."}),
                 "clip_strength_multiplier": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.05,
                                                        "tooltip": "How strongly LoRAs affect text understanding, relative to output_strength. At 1.0, CLIP uses the same strength as the model. Lower values reduce LoRA influence on prompt interpretation while keeping the visual effect."}),
-                "auto_strength": (["disabled", "enabled"], {
-                    "default": "disabled",
+                "auto_strength": (["enabled", "disabled"], {
+                    "default": "enabled",
                     "tooltip": "Automatically turns down individual LoRA strengths when combining many LoRAs to avoid oversaturated or distorted results. Useful when stacking 3+ LoRAs."
                 }),
                 "free_vram_between_passes": (["disabled", "enabled"], {
@@ -1537,6 +1738,14 @@ class LoRAOptimizer(_LoRAMergeBase):
                                "At 1.0, no weights are dropped (equivalent to disabled). "
                                "Note: in TIES mode, sparsification replaces the trim step — setting density to 1.0 disables both sparsification AND trimming."
                 }),
+                "merge_quality": (["standard", "enhanced", "maximum"], {
+                    "default": "standard",
+                    "tooltip": "Merge quality level. standard: current behavior. "
+                               "enhanced: column-wise conflict resolution + selfish weight "
+                               "protection (minimal extra compute, no extra VRAM). "
+                               "maximum: adds SVD alignment before merge (best quality, "
+                               "uses more VRAM for SVD decomposition)."
+                }),
                 "merge_strategy_override": ("STRING", {
                     "default": "",
                     "forceInput": True,
@@ -1552,7 +1761,7 @@ class LoRAOptimizer(_LoRAMergeBase):
     DESCRIPTION = "Auto-analyzes LoRA stack and selects optimal merge strategy per weight group. Outputs merged model + analysis report. Best for style/character LoRAs — apply edit, distillation (LCM/Turbo/Hyper), or DPO LoRAs via a standard Load LoRA node instead."
 
     @staticmethod
-    def _compute_cache_key(lora_stack, output_strength, clip_strength_multiplier, auto_strength, optimization_mode="per_prefix", compress_patches="non_ties", svd_device="gpu", normalize_keys="disabled", sparsification="disabled", sparsification_density=0.7, merge_strategy_override=""):
+    def _compute_cache_key(lora_stack, output_strength, clip_strength_multiplier, auto_strength, optimization_mode="per_prefix", compress_patches="non_ties", svd_device="gpu", normalize_keys="disabled", sparsification="disabled", sparsification_density=0.7, merge_strategy_override="", merge_quality="standard"):
         """
         Build a deterministic SHA-256 hash (16 hex chars) from the stack
         configuration. Used by IS_CHANGED to let ComfyUI skip re-execution
@@ -1573,7 +1782,7 @@ class LoRAOptimizer(_LoRAMergeBase):
                     entries.append((str(item.get("name", "")), float(item.get("strength", 0)), cm))
             entries.sort()
             h.update(json.dumps(entries).encode())
-        h.update(f"|os={output_strength}|csm={clip_strength_multiplier}|as={auto_strength}|om={optimization_mode}|cp={compress_patches}|sd={svd_device}|nk={normalize_keys}|sp={sparsification}|spd={sparsification_density}|mso={merge_strategy_override}".encode())
+        h.update(f"|os={output_strength}|csm={clip_strength_multiplier}|as={auto_strength}|om={optimization_mode}|cp={compress_patches}|sd={svd_device}|nk={normalize_keys}|sp={sparsification}|spd={sparsification_density}|mso={merge_strategy_override}|mq={merge_quality}".encode())
         return h.hexdigest()[:16]
 
     @classmethod
@@ -1583,13 +1792,13 @@ class LoRAOptimizer(_LoRAMergeBase):
                    cache_patches="enabled", compress_patches="non_ties",
                    svd_device="gpu", normalize_keys="disabled",
                    sparsification="disabled", sparsification_density=0.7,
-                   merge_strategy_override=""):
+                   merge_strategy_override="", merge_quality="standard"):
         return cls._compute_cache_key(lora_stack, output_strength,
                                       clip_strength_multiplier, auto_strength,
                                       optimization_mode, compress_patches,
                                       svd_device, normalize_keys,
                                       sparsification, sparsification_density,
-                                      merge_strategy_override)
+                                      merge_strategy_override, merge_quality)
 
     def _save_report_to_disk(self, cache_key, lora_combo, auto_strength, report, selected_params):
         """
@@ -2135,7 +2344,8 @@ class LoRAOptimizer(_LoRAMergeBase):
                       mode, density, sign_method, reasoning, merge_summary,
                       auto_strength_info=None, strategy_counts=None, optimization_mode="global",
                       prefix_decisions=None, detected_arch=None, normalize_keys="disabled",
-                      sparsification="disabled", sparsification_density=0.7):
+                      sparsification="disabled", sparsification_density=0.7,
+                      merge_quality="standard"):
         """Format analysis as a multi-line report string."""
         lines = []
         lines.append("=" * 50)
@@ -2232,6 +2442,13 @@ class LoRAOptimizer(_LoRAMergeBase):
             else:
                 lines.append(f"  Applied as preprocessing before {mode}")
 
+        if merge_quality != "standard":
+            quality_desc = {
+                "enhanced": "Enhanced (column-wise + TALL-masks)",
+                "maximum": "Maximum (KnOTS SVD alignment + column-wise + TALL-masks)",
+            }
+            lines.append(f"  Merge quality: {quality_desc.get(merge_quality, merge_quality)}")
+
         # Per-Prefix Strategy breakdown (only in per_prefix mode)
         if optimization_mode == "per_prefix" and strategy_counts:
             lines.append("")
@@ -2327,7 +2544,7 @@ class LoRAOptimizer(_LoRAMergeBase):
         lines.append("=" * 50)
         return "\n".join(lines)
 
-    def optimize_merge(self, model, lora_stack, output_strength, clip=None, clip_strength_multiplier=1.0, auto_strength="disabled", free_vram_between_passes="disabled", optimization_mode="per_prefix", cache_patches="enabled", compress_patches="non_ties", svd_device="gpu", normalize_keys="disabled", sparsification="disabled", sparsification_density=0.7, merge_strategy_override=""):
+    def optimize_merge(self, model, lora_stack, output_strength, clip=None, clip_strength_multiplier=1.0, auto_strength="disabled", free_vram_between_passes="disabled", optimization_mode="per_prefix", cache_patches="enabled", compress_patches="non_ties", svd_device="gpu", normalize_keys="disabled", sparsification="disabled", sparsification_density=0.7, merge_strategy_override="", merge_quality="standard"):
         """
         Main entry point. Two-pass streaming architecture:
         Pass 1: Compute diffs per-prefix, sample conflicts + magnitudes, discard diffs
@@ -2382,7 +2599,7 @@ class LoRAOptimizer(_LoRAMergeBase):
                                             optimization_mode, compress_patches,
                                             svd_device, normalize_keys,
                                             sparsification, sparsification_density,
-                                            merge_strategy_override)
+                                            merge_strategy_override, merge_quality)
         if cache_patches == "enabled" and cache_key in self._merge_cache:
             model_patches, clip_patches, report, clip_strength_out, lora_data = self._merge_cache[cache_key]
             new_model = model
@@ -2807,14 +3024,27 @@ class LoRAOptimizer(_LoRAMergeBase):
                     for idx in range(len(diffs_list))
                 )
                 if has_conflict_modes:
-                    # Unweighted sign voting (frequency method, consistent with TIES):
-                    # each LoRA gets one vote per element regardless of strength.
+                    # Sign voting for conflict-mode masking.
                     # Negative eff_strength flips the effective direction, so we
                     # negate the sign vote accordingly.
-                    sign_sum = torch.zeros_like(diffs_list[0][0])
-                    for diff, weight in diffs_list:
-                        sign_sum += diff.sign() if weight >= 0 else -diff.sign()
-                    majority_sign = torch.where(sign_sum >= 0, 1.0, -1.0)
+                    if merge_quality != "standard" and diffs_list[0][0].dim() >= 2:
+                        # Column-wise: each output neuron (row) votes as a unit
+                        ref = diffs_list[0][0]
+                        out_dim = ref.shape[0]
+                        sign_sum = torch.zeros(out_dim, device=ref.device, dtype=torch.float32)
+                        for diff, weight in diffs_list:
+                            d = diff if weight >= 0 else -diff
+                            sign_sum += d.reshape(out_dim, -1).to(dtype=torch.float32).sum(dim=1).sign()
+                        majority_sign = torch.where(sign_sum >= 0, 1.0, -1.0)
+                        majority_sign = majority_sign.reshape(-1, *([1] * (ref.dim() - 1))).expand_as(ref)
+                        del sign_sum
+                    else:
+                        # Element-wise: each position votes independently
+                        sign_sum = torch.zeros_like(diffs_list[0][0])
+                        for diff, weight in diffs_list:
+                            sign_sum += diff.sign() if weight >= 0 else -diff.sign()
+                        majority_sign = torch.where(sign_sum >= 0, 1.0, -1.0)
+                        del sign_sum
 
                     masked_diffs = []
                     for idx, (diff, weight) in enumerate(diffs_list):
@@ -2827,7 +3057,7 @@ class LoRAOptimizer(_LoRAMergeBase):
                             diff = diff * ((effective_diff * majority_sign) < 0).float()
                         masked_diffs.append((diff, weight))
                     diffs_list = masked_diffs
-                    del sign_sum, majority_sign
+                    del majority_sign
 
             # Re-check single-LoRA case (diff computation may have failed for some)
             if pf_mode == "weighted_sum" and len(diffs_list) <= 1:
@@ -2850,7 +3080,8 @@ class LoRAOptimizer(_LoRAMergeBase):
                 compute_device=compute_device,
                 sparsification=sparsification,
                 sparsification_density=sparsification_density,
-                sparsification_generator=sp_gen
+                sparsification_generator=sp_gen,
+                merge_quality=merge_quality,
             )
             diffs_list.clear()  # Free input diffs from GPU
             if merged_diff is None:
@@ -2979,6 +3210,7 @@ class LoRAOptimizer(_LoRAMergeBase):
             normalize_keys=normalize_keys,
             sparsification=sparsification,
             sparsification_density=sparsification_density,
+            merge_quality=merge_quality,
         )
 
         # Bundle LORA_DATA for optional downstream saving
