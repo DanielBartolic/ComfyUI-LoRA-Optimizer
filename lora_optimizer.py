@@ -4211,8 +4211,13 @@ class LoRAAutoTuner(LoRAOptimizer):
                          f" auto_str={c['auto_strength']} {c['optimization_mode']}")
 
         # --- Phase 2: Merge top-N and measure ---
+        # Only keep the current best in memory to avoid accumulating ~40GB per candidate.
         top_candidates = scored[:top_n]
         results = []
+        best_model = None
+        best_clip = None
+        best_lora_data = None
+        best_score = -1.0
         logging.info(f"[LoRA AutoTuner] Phase 2: Merging and measuring top {len(top_candidates)} candidates...")
 
         for rank_idx, (h_score, config) in enumerate(top_candidates):
@@ -4259,6 +4264,18 @@ class LoRAAutoTuner(LoRAOptimizer):
                          f"(merge {t_elapsed - t_score_elapsed:.1f}s + score {t_score_elapsed:.1f}s)")
             pbar.update(1)
 
+            # Keep only the best model in memory, free the rest immediately
+            if measured["composite_score"] > best_score:
+                # Free previous best before replacing
+                del best_model, best_clip, best_lora_data
+                best_model = merged_model
+                best_clip = merged_clip
+                best_lora_data = lora_data
+                best_score = measured["composite_score"]
+            else:
+                # Discard this candidate's heavy objects immediately
+                del merged_model, merged_clip, lora_data
+
             results.append({
                 "rank": rank_idx + 1,
                 "score_heuristic": h_score,
@@ -4270,9 +4287,6 @@ class LoRAAutoTuner(LoRAOptimizer):
                     "sparsity_mean": measured.get("sparsity_mean", 0.0),
                     "norm_cv": measured.get("norm_cv", 0.0),
                 },
-                "merged_model": merged_model,
-                "merged_clip": merged_clip,
-                "lora_data": lora_data,
             })
 
         del all_magnitude_samples
@@ -4283,12 +4297,10 @@ class LoRAAutoTuner(LoRAOptimizer):
         for i, r in enumerate(results):
             r["rank"] = i + 1
 
-        # Best result — free non-best models to reclaim memory
         best = results[0]
-        for r in results[1:]:
-            r.pop("merged_model", None)
-            r.pop("merged_clip", None)
-            r.pop("lora_data", None)
+        best["merged_model"] = best_model
+        best["merged_clip"] = best_clip
+        best["lora_data"] = best_lora_data
 
         # Build TUNER_DATA (exclude model/clip objects)
         tuner_data = {
