@@ -5001,14 +5001,15 @@ class SaveMergedLoRA:
             return ("",)
 
         # Determine save path
-        if os.path.isabs(filename) or os.sep in filename or '/' in filename:
-            # Absolute or relative path provided — use as-is
+        if os.path.isabs(filename):
+            # Absolute path provided — use as-is
             save_path = filename if filename.endswith('.safetensors') else f"{filename}.safetensors"
             save_dir = os.path.dirname(save_path)
         else:
-            # Plain filename — save to primary ComfyUI loras folder
+            # Plain filename or relative path — save under primary ComfyUI loras folder
             save_dir = folder_paths.get_folder_paths("loras")[0]
-            save_path = os.path.join(save_dir, f"{filename}.safetensors")
+            base = filename if filename.endswith('.safetensors') else f"{filename}.safetensors"
+            save_path = os.path.join(save_dir, base)
         os.makedirs(save_dir, exist_ok=True)
 
         model_patches = lora_data["model_patches"]
