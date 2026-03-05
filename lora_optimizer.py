@@ -12,6 +12,7 @@ import json
 import hashlib
 import time
 import re
+import gc
 import concurrent.futures
 import folder_paths
 import comfy.utils
@@ -4275,6 +4276,7 @@ class LoRAAutoTuner(LoRAOptimizer):
             else:
                 # Discard this candidate's heavy objects immediately
                 del merged_model, merged_clip, lora_data
+            gc.collect()
 
             results.append({
                 "rank": rank_idx + 1,
