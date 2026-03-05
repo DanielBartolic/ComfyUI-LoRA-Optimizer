@@ -1257,10 +1257,19 @@ class _LoRAMergeBase:
                 logging.warning("[LoRA Optimizer] KnOTS SVD OOM on GPU, falling back to CPU")
                 torch.cuda.empty_cache()
                 M = M.cpu()
-                U, S, V = torch.svd_lowrank(M, q=rank)
+                try:
+                    U, S, V = torch.svd_lowrank(M, q=rank)
+                except RuntimeError:
+                    logging.warning("[LoRA Optimizer] KnOTS SVD also failed on CPU, skipping alignment")
+                    del M
+                    return diffs_with_weights
             else:
                 return diffs_with_weights
         del M
+
+        # After CPU fallback, SVD results are on CPU — ensure aligned diffs
+        # return on the same device as the input diffs
+        output_device = compute_device if compute_device is not None else ref.device
 
         # Reconstruct each diff in shared basis
         aligned = []
@@ -1268,8 +1277,8 @@ class _LoRAMergeBase:
         for i, (_, w) in enumerate(diffs_with_weights):
             Vi = V[i * in_dim:(i + 1) * in_dim, :]  # [in, rank]
             aligned_diff = (US @ Vi.T).reshape(original_shape)
-            if compute_device is not None:
-                aligned_diff = aligned_diff.to(compute_device)
+            if aligned_diff.device != output_device:
+                aligned_diff = aligned_diff.to(output_device)
             aligned.append((aligned_diff, w))
         del U, S, V, US
 
