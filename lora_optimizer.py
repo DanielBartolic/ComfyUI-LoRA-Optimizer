@@ -407,21 +407,20 @@ class _DiffCache:
             return
         cached = tensor.detach().half().cpu()
         tensor_bytes = cached.nelement() * cached.element_size()
-        if self._use_disk(tensor_bytes):
-            if self._disk_failed:
-                return  # Disk writes already failed, skip silently
+        if self._use_disk(tensor_bytes) and not self._disk_failed:
             try:
                 import hashlib, numpy as np
                 name_hash = hashlib.sha256(f"{key[0]}_{key[1]}".encode()).hexdigest()[:16]
                 path = os.path.join(self._cache_dir, f"{name_hash}.npy")
                 np.save(path, cached.numpy())
                 self._disk_store[key] = path
+                return
             except Exception as e:
                 self._disk_failed = True
-                logging.warning(f"[DiffCache] Disk cache disabled — {e}")
-        else:
-            self._ram_store[key] = cached if self.mode != "ram" else cached.clone()
-            self._ram_bytes += tensor_bytes
+                logging.warning(f"[DiffCache] Disk cache failed, falling back to RAM — {e}")
+        # RAM storage (also used as fallback when disk fails)
+        self._ram_store[key] = cached.clone()
+        self._ram_bytes += tensor_bytes
 
     def size_mb(self):
         total = self._ram_bytes
