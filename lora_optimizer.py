@@ -4328,8 +4328,8 @@ class LoRAAutoTuner(LoRAOptimizer):
                     "tooltip": "Record analysis metrics and scored configs to a JSONL dataset file for threshold tuning research. Saved to lora_optimizer_reports/autotuner_dataset.jsonl."
                 }),
                 "diff_cache_mode": (["disabled", "ram", "disk"], {
-                    "default": "ram",
-                    "tooltip": "Cache raw LoRA diffs across candidates to avoid redundant computation. 'ram' is fastest (uses ~3-12GB RAM). 'disk' uses temp files with memory-mapping (slower but low RAM). 'disabled' recomputes diffs each time."
+                    "default": "disabled",
+                    "tooltip": "Cache LoRA diffs across candidates to skip redundant computation. 'disabled' recomputes each time (slowest, no extra memory). 'ram' caches in memory (~1.5GB SDXL, ~6GB Flux — fastest, <1ms per diff). 'disk' caches to temp files (~1.5-6GB disk, ~1-10ms per diff vs 5-50ms to recompute). WARNING: ram/disk can use significant memory/storage on large models."
                 }),
                 "vram_budget": ("FLOAT", {
                     "default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05,
