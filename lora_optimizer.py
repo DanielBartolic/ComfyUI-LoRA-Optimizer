@@ -349,19 +349,20 @@ class _DiffCache:
         if key in self._store:
             return
         if self.mode == "disk":
-            prefix_str = key[0].replace(".", "_").replace("/", "_")
-            path = os.path.join(self._cache_dir, f"{prefix_str}_{key[1]}.pt")
-            torch.save(tensor.cpu(), path)
+            import hashlib
+            name_hash = hashlib.sha256(f"{key[0]}_{key[1]}".encode()).hexdigest()[:16]
+            path = os.path.join(self._cache_dir, f"{name_hash}.pt")
+            torch.save(tensor.detach().cpu(), path)
             self._store[key] = path
         else:
-            self._store[key] = tensor.cpu()
+            self._store[key] = tensor.detach().clone().cpu()
 
     def clear(self):
         self._store.clear()
         if self._cache_dir is not None:
-            import shutil
+            import shutil, tempfile
             shutil.rmtree(self._cache_dir, ignore_errors=True)
-            self._cache_dir = None
+            self._cache_dir = tempfile.mkdtemp(prefix="lora_diff_cache_")
 
     def __contains__(self, key):
         return key in self._store
@@ -3845,9 +3846,7 @@ class LoRAOptimizer(_LoRAMergeBase):
                     diff = _diff_cache.get(cache_key,
                                            device=compute_device if use_gpu else None).float()
                     if storage_dtype is None:
-                        lora_info_for_dtype = self._get_lora_key_info(item["lora"], lora_prefix)
-                        if lora_info_for_dtype is not None:
-                            storage_dtype = lora_info_for_dtype[0].dtype
+                        storage_dtype = lora_info[0].dtype
 
                     if is_clip_key and item["clip_strength"] is not None:
                         eff_strength = item["clip_strength"]
@@ -4644,6 +4643,7 @@ class LoRAAutoTuner(LoRAOptimizer):
             })
 
         if _diff_cache is not None:
+            logging.info(f"[LoRA AutoTuner] Diff cache: {len(_diff_cache._store)} entries cached")
             _diff_cache.clear()
             del _diff_cache
         del all_magnitude_samples
