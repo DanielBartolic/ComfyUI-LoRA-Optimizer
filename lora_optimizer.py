@@ -21,6 +21,10 @@ import comfy.lora
 from comfy.weight_adapter.lora import LoRAAdapter
 from safetensors.torch import save_file
 
+TUNER_DATA_DIR = os.path.join(folder_paths.models_dir, "tuner_data")
+os.makedirs(TUNER_DATA_DIR, exist_ok=True)
+folder_paths.add_model_folder_path("tuner_data", TUNER_DATA_DIR)
+
 
 # ---------------------------------------------------------------------------
 # Architecture-aware threshold presets
@@ -5069,6 +5073,71 @@ class SaveMergedLoRA:
         return (save_path,)
 
 
+class SaveTunerData:
+    """Saves AutoTuner results (TUNER_DATA) to a JSON file for later reuse."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "tuner_data": ("TUNER_DATA", {"tooltip": "Connect the tuner_data output from LoRA AutoTuner."}),
+                "filename": ("STRING", {"default": "tuner_data", "tooltip": "Filename (saved to models/tuner_data/). Absolute path saves to that location instead."}),
+            }
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("file_path",)
+    FUNCTION = "save_tuner_data"
+    CATEGORY = "LoRA Optimizer"
+    OUTPUT_NODE = True
+    DESCRIPTION = "Saves AutoTuner results to a JSON file so they can be reloaded later without re-running the tuner."
+
+    def save_tuner_data(self, tuner_data, filename):
+        if tuner_data is None:
+            return ("",)
+        base = filename if filename.endswith(".json") else f"{filename}.json"
+        if os.path.isabs(filename):
+            save_path = base
+        else:
+            save_path = os.path.join(TUNER_DATA_DIR, base)
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        with open(save_path, "w") as f:
+            json.dump(tuner_data, f, indent=2)
+        logging.info(f"[Save Tuner Data] Saved to: {save_path}")
+        return (save_path,)
+
+
+class LoadTunerData:
+    """Loads previously saved AutoTuner results (TUNER_DATA) from a JSON file."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "tuner_data_file": (folder_paths.get_filename_list("tuner_data"), {"tooltip": "Select a saved tuner data file."}),
+            }
+        }
+
+    RETURN_TYPES = ("TUNER_DATA",)
+    RETURN_NAMES = ("tuner_data",)
+    FUNCTION = "load_tuner_data"
+    CATEGORY = "LoRA Optimizer"
+    DESCRIPTION = "Loads saved AutoTuner results from disk so they can be fed to Merge Selector without re-running the tuner."
+
+    @classmethod
+    def IS_CHANGED(cls, tuner_data_file):
+        load_path = folder_paths.get_full_path_or_raise("tuner_data", tuner_data_file)
+        return os.path.getmtime(load_path)
+
+    def load_tuner_data(self, tuner_data_file):
+        load_path = folder_paths.get_full_path_or_raise("tuner_data", tuner_data_file)
+        with open(load_path, "r") as f:
+            tuner_data = json.load(f)
+        logging.info(f"[Load Tuner Data] Loaded from: {load_path} "
+                     f"({len(tuner_data.get('top_n', []))} configs)")
+        return (tuner_data,)
+
+
 class MergedLoRAToHook:
     """Converts merged LoRA data into a conditioning hook for per-conditioning application."""
 
@@ -5609,6 +5678,8 @@ NODE_CLASS_MAPPINGS = {
     "WanVideoLoRAOptimizer": WanVideoLoRAOptimizer,
     "LoRAAutoTuner": LoRAAutoTuner,
     "LoRAMergeSelector": LoRAMergeSelector,
+    "SaveTunerData": SaveTunerData,
+    "LoadTunerData": LoadTunerData,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -5623,4 +5694,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "WanVideoLoRAOptimizer": "(WIP) WanVideo LoRA Optimizer",
     "LoRAAutoTuner": "LoRA AutoTuner",
     "LoRAMergeSelector": "Merge Selector",
+    "SaveTunerData": "Save Tuner Data",
+    "LoadTunerData": "Load Tuner Data",
 }
