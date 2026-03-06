@@ -325,50 +325,120 @@ class LoRAStackDynamic:
 
 
 class _DiffCache:
-    """Cache for raw LoRA diffs across AutoTuner candidates."""
+    """Cache for raw LoRA diffs across AutoTuner candidates.
 
-    def __init__(self, mode="ram"):
+    Modes:
+      - "ram": All entries in RAM (fastest, most memory).
+      - "disk": All entries on disk via torch.save/mmap (slowest, least memory).
+      - "auto": RAM up to ram_pct of free system memory, then spills to disk.
+    """
+
+    def __init__(self, mode="auto", ram_pct=0.5):
         self.mode = mode
-        self._store = {}
+        self._ram_store = {}
+        self._disk_store = {}
+        self._prefetch_buf = {}
+        self._prefetch_thread = None
+        self._ram_bytes = 0
+        self._ram_limit = None
         self._cache_dir = None
-        if mode == "disk":
+        if mode in ("disk", "auto"):
             import tempfile
             self._cache_dir = tempfile.mkdtemp(prefix="lora_diff_cache_")
+        if mode == "auto":
+            try:
+                import psutil
+                self._ram_limit = int(psutil.virtual_memory().available * ram_pct)
+            except ImportError:
+                # psutil not available — use 4GB as fallback
+                self._ram_limit = 4 * 1024 * 1024 * 1024
+
+    def _use_disk(self, tensor_bytes):
+        if self.mode == "disk":
+            return True
+        if self.mode == "ram":
+            return False
+        # auto: spill to disk if RAM limit would be exceeded
+        return (self._ram_bytes + tensor_bytes) > self._ram_limit
+
+    def prefetch(self, keys):
+        """Load disk entries into a prefetch buffer in a background thread."""
+        self._wait_prefetch()
+        self._prefetch_buf.clear()
+        disk_keys = [k for k in keys if k in self._disk_store]
+        if not disk_keys:
+            return
+        import threading
+        def _load():
+            for k in disk_keys:
+                try:
+                    self._prefetch_buf[k] = torch.load(
+                        self._disk_store[k], map_location="cpu",
+                        weights_only=True, mmap=True)
+                except Exception:
+                    pass
+        self._prefetch_thread = threading.Thread(target=_load, daemon=True)
+        self._prefetch_thread.start()
+
+    def _wait_prefetch(self):
+        if self._prefetch_thread is not None:
+            self._prefetch_thread.join()
+            self._prefetch_thread = None
 
     def get(self, key, device=None):
-        if key not in self._store:
-            return None
-        val = self._store[key]
-        if self.mode == "disk":
-            return torch.load(val, map_location=device or "cpu",
-                              weights_only=True, mmap=True)
-        else:
+        self._wait_prefetch()
+        # Check prefetch buffer first
+        if key in self._prefetch_buf:
+            val = self._prefetch_buf.pop(key)
+            return val.to(device) if device is not None else val
+        if key in self._ram_store:
+            val = self._ram_store[key]
             return val.to(device) if device is not None else val.clone()
+        if key in self._disk_store:
+            return torch.load(self._disk_store[key], map_location=device or "cpu",
+                              weights_only=True, mmap=True)
+        return None
 
     def put(self, key, tensor):
-        if key in self._store:
+        if key in self._ram_store or key in self._disk_store:
             return
-        if self.mode == "disk":
+        cached = tensor.detach().half().cpu()
+        tensor_bytes = cached.nelement() * cached.element_size()
+        if self._use_disk(tensor_bytes):
             try:
                 import hashlib
                 name_hash = hashlib.sha256(f"{key[0]}_{key[1]}".encode()).hexdigest()[:16]
                 path = os.path.join(self._cache_dir, f"{name_hash}.pt")
-                torch.save(tensor.detach().half().cpu(), path)
-                self._store[key] = path
+                torch.save(cached, path)
+                self._disk_store[key] = path
             except Exception as e:
                 logging.warning(f"[DiffCache] Failed to write cache file: {e}")
         else:
-            self._store[key] = tensor.detach().clone().half().cpu()
+            self._ram_store[key] = cached if self.mode != "ram" else cached.clone()
+            self._ram_bytes += tensor_bytes
+
+    def size_mb(self):
+        total = self._ram_bytes
+        for path in self._disk_store.values():
+            try:
+                total += os.path.getsize(path)
+            except OSError:
+                pass
+        return total / (1024 * 1024)
 
     def clear(self):
-        self._store.clear()
+        self._wait_prefetch()
+        self._prefetch_buf.clear()
+        self._ram_store.clear()
+        self._disk_store.clear()
+        self._ram_bytes = 0
         if self._cache_dir is not None:
             import shutil, tempfile
             shutil.rmtree(self._cache_dir, ignore_errors=True)
             self._cache_dir = tempfile.mkdtemp(prefix="lora_diff_cache_")
 
     def __contains__(self, key):
-        return key in self._store
+        return key in self._ram_store or key in self._disk_store
 
 
 class _LoRAMergeBase:
@@ -4038,7 +4108,13 @@ class LoRAOptimizer(_LoRAMergeBase):
             prefix_decisions.append((prefix, used_mode, conflict, n_loras))
 
         if use_gpu:
-            for lora_prefix, (target_key, is_clip_key) in all_key_targets.items():
+            prefix_list = list(all_key_targets.items())
+            n_loras = len(active_loras)
+            for idx, (lora_prefix, (target_key, is_clip_key)) in enumerate(prefix_list):
+                # Prefetch next prefix's diffs from disk while merging current one
+                if _diff_cache is not None and idx + 1 < len(prefix_list):
+                    next_prefix = prefix_list[idx + 1][0]
+                    _diff_cache.prefetch([(next_prefix, i) for i in range(n_loras)])
                 _collect_merge_result(_merge_one_prefix(lora_prefix, target_key, is_clip_key))
         else:
             max_workers = min(4, max(1, len(all_key_targets)))
@@ -4330,9 +4406,13 @@ class LoRAAutoTuner(LoRAOptimizer):
                     "default": "disabled",
                     "tooltip": "Record analysis metrics and scored configs to a JSONL dataset file for threshold tuning research. Saved to lora_optimizer_reports/autotuner_dataset.jsonl."
                 }),
-                "diff_cache_mode": (["disabled", "ram", "disk"], {
+                "diff_cache_mode": (["disabled", "auto", "ram", "disk"], {
                     "default": "disabled",
-                    "tooltip": "Cache LoRA diffs across candidates to skip redundant computation. 'disabled' recomputes each time (slowest, no extra memory). 'ram' caches in memory (~1.5GB SDXL, ~6GB Flux — fastest, <1ms per diff). 'disk' caches to temp files (~1.5-6GB disk, ~1-10ms per diff vs 5-50ms to recompute). WARNING: ram/disk can use significant memory/storage on large models."
+                    "tooltip": "Cache LoRA diffs across candidates to skip redundant computation. 'disabled' recomputes each time (slowest, no extra memory). 'auto' uses RAM up to diff_cache_ram_pct of free memory then spills to disk (recommended). 'ram' caches entirely in memory (~1.5GB SDXL, ~6GB Flux — fastest). 'disk' caches entirely to temp files (~1-10ms per diff vs 5-50ms to recompute). WARNING: ram/disk can use significant memory/storage on large models."
+                }),
+                "diff_cache_ram_pct": ("FLOAT", {
+                    "default": 0.5, "min": 0.1, "max": 0.9, "step": 0.05,
+                    "tooltip": "Fraction of free system RAM to use for diff cache in 'auto' mode. 0.5 = use up to 50%% of available RAM before spilling to disk."
                 }),
                 "vram_budget": ("FLOAT", {
                     "default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05,
@@ -4355,7 +4435,7 @@ class LoRAAutoTuner(LoRAOptimizer):
                   clip_strength_multiplier=1.0, top_n=3, normalize_keys="disabled",
                   scoring_svd="disabled", scoring_device="gpu",
                   architecture_preset="auto", record_dataset="disabled",
-                  diff_cache_mode="disabled", vram_budget=0.0):
+                  diff_cache_mode="disabled", diff_cache_ram_pct=0.5, vram_budget=0.0):
         import hashlib, json
 
         # --- Normalize & validate stack ---
@@ -4557,7 +4637,7 @@ class LoRAAutoTuner(LoRAOptimizer):
         # Initialize diff cache for Phase 2
         _diff_cache = None
         if diff_cache_mode != "disabled":
-            _diff_cache = _DiffCache(mode=diff_cache_mode)
+            _diff_cache = _DiffCache(mode=diff_cache_mode, ram_pct=diff_cache_ram_pct)
             logging.info(f"[LoRA AutoTuner] Diff cache enabled (mode={diff_cache_mode})")
 
         # Only keep the current best in memory to avoid accumulating ~40GB per candidate.
@@ -4646,7 +4726,11 @@ class LoRAAutoTuner(LoRAOptimizer):
             })
 
         if _diff_cache is not None:
-            logging.info(f"[LoRA AutoTuner] Diff cache: {len(_diff_cache._store)} entries cached")
+            n_ram = len(_diff_cache._ram_store)
+            n_disk = len(_diff_cache._disk_store)
+            logging.info(f"[LoRA AutoTuner] Diff cache: {n_ram + n_disk} entries, "
+                         f"{_diff_cache.size_mb():.1f} MB "
+                         f"({n_ram} ram, {n_disk} disk)")
             _diff_cache.clear()
             del _diff_cache
         del all_magnitude_samples
