@@ -4080,6 +4080,15 @@ class LoRAOptimizer(_LoRAMergeBase):
             input_norms_mean = (sum(d.float().norm().item() * abs(w) for d, w in diffs_list)
                                 / len(diffs_list)) if diffs_list else 0.0
 
+            # DEBUG: log diff count per prefix for first 3 prefixes
+            if processed_keys < 3:
+                logging.info(f"[LoRA Optimizer] DEBUG prefix={lora_prefix}: "
+                             f"n_diffs={len(diffs_list)}, "
+                             f"dtypes={[d.dtype for d,w in diffs_list]}, "
+                             f"shapes={[list(d.shape) for d,w in diffs_list]}, "
+                             f"weights={[w for d,w in diffs_list]}, "
+                             f"mode={pf_mode}, target={target_key}")
+
             merged_diff = self._merge_diffs(
                 diffs_list, pf_mode,
                 density=pf_density, majority_sign_method=pf_sign,
@@ -4092,6 +4101,12 @@ class LoRAOptimizer(_LoRAMergeBase):
                 keep_on_gpu=should_keep,
             )
             merged_norm = merged_diff.float().norm().item() if merged_diff is not None else 0.0
+            # DEBUG: log merged diff info for first 3 prefixes
+            if processed_keys < 3:
+                logging.info(f"[LoRA Optimizer] DEBUG merged: dtype={merged_diff.dtype}, "
+                             f"shape={list(merged_diff.shape)}, "
+                             f"sum={merged_diff.float().sum().item():.4f}, "
+                             f"storage_dtype={storage_dtype}")
             diffs_list.clear()  # Free input diffs from GPU
             if merged_diff is None:
                 return None
