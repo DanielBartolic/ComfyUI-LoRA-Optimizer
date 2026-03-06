@@ -4458,11 +4458,15 @@ class LoRAAutoTuner(LoRAOptimizer):
                     "default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05,
                     "tooltip": "Fraction of free VRAM to use for storing merged patches. 0 = all CPU (default), 1.0 = use all free VRAM. Reduces RAM usage on GPU systems."
                 }),
+                "scoring_speed": (["full", "fast", "turbo"], {
+                    "default": "full",
+                    "tooltip": "Phase 2 scoring speed. 'full' scores all prefixes (most accurate). 'fast' scores every 2nd high-conflict prefix (~50% faster). 'turbo' scores every 3rd (~67% faster). All candidates are scored on the same subset so ranking stays fair."
+                }),
             },
         }
 
-    RETURN_TYPES = ("MODEL", "CLIP", "STRING", "TUNER_DATA", "LORA_DATA")
-    RETURN_NAMES = ("model", "clip", "report", "tuner_data", "lora_data")
+    RETURN_TYPES = ("MODEL", "CLIP", "STRING", "STRING", "TUNER_DATA", "LORA_DATA")
+    RETURN_NAMES = ("model", "clip", "report", "analysis_report", "tuner_data", "lora_data")
     FUNCTION = "auto_tune"
     CATEGORY = "LoRA Optimizer"
     DESCRIPTION = (
@@ -4476,14 +4480,15 @@ class LoRAAutoTuner(LoRAOptimizer):
                   scoring_svd="disabled", scoring_device="gpu",
                   architecture_preset="auto", record_dataset="disabled",
                   cache_patches="enabled",
-                  diff_cache_mode="disabled", diff_cache_ram_pct=0.5, vram_budget=0.0):
+                  diff_cache_mode="disabled", diff_cache_ram_pct=0.5, vram_budget=0.0,
+                  scoring_speed="full"):
         import hashlib, json
 
         # --- Normalize & validate stack ---
         normalized_stack = self._normalize_stack(lora_stack, normalize_keys=normalize_keys)
         active_loras = [item for item in normalized_stack if item["strength"] != 0]
         if not active_loras:
-            return (model, clip, "No active LoRAs in stack.", None, None)
+            return (model, clip, "No active LoRAs in stack.", "", None, None)
 
         if len(active_loras) == 1:
             # Single LoRA: nothing to tune, delegate directly
@@ -4494,7 +4499,7 @@ class LoRAAutoTuner(LoRAOptimizer):
                 architecture_preset=architecture_preset, vram_budget=vram_budget,
             )
             return (merged_model, merged_clip,
-                    "Single LoRA detected -- no parameters to tune.\n\n" + report, None, lora_data)
+                    "Single LoRA detected -- no parameters to tune.\n\n" + report, report, None, lora_data)
 
         # Compute lora_hash for cache validation
         hash_input = json.dumps([(l["name"], l["strength"]) for l in active_loras],
@@ -4505,7 +4510,8 @@ class LoRAAutoTuner(LoRAOptimizer):
         at_cache_key = hashlib.sha256(
             f"{lora_hash}|os={output_strength}|csm={clip_strength_multiplier}"
             f"|top_n={top_n}|nk={normalize_keys}|ss={scoring_svd}"
-            f"|ap={architecture_preset}|vb={vram_budget}".encode()
+            f"|ap={architecture_preset}|vb={vram_budget}"
+            f"|spd={scoring_speed}".encode()
         ).hexdigest()[:16]
         if cache_patches == "enabled" and hasattr(self, '_autotuner_cache') and at_cache_key in self._autotuner_cache:
             cached = self._autotuner_cache[at_cache_key]
@@ -4596,8 +4602,9 @@ class LoRAAutoTuner(LoRAOptimizer):
 
         logging.info(f"[LoRA AutoTuner] Pass 1: Analyzing {len(all_lora_prefixes)} prefixes...")
         t_start = time.time()
-        # Progress bar: analysis prefixes + top_n merges
-        pbar = comfy.utils.ProgressBar(len(all_lora_prefixes) + top_n)
+        # Progress bar: analysis prefixes + top_n merges (+ 1 final merge when subsampling)
+        n_pbar_merges = top_n + (1 if scoring_speed != "full" and top_n > 1 else 0)
+        pbar = comfy.utils.ProgressBar(len(all_lora_prefixes) + n_pbar_merges)
         if use_gpu:
             for lora_prefix in all_lora_prefixes:
                 result = self._analyze_prefix(lora_prefix, active_loras,
@@ -4691,6 +4698,35 @@ class LoRAAutoTuner(LoRAOptimizer):
         _analysis_cache["all_magnitude_samples"] = []
         gc.collect()
 
+        # --- Prefix subsampling for Phase 2 (scoring_speed) ---
+        use_subsampling = scoring_speed != "full" and top_n > 1
+        scoring_cache = _analysis_cache  # default: use full cache
+        if use_subsampling:
+            step = 2 if scoring_speed == "fast" else 3
+            # Separate single-LoRA prefixes (always included, identical across candidates)
+            # from multi-LoRA prefixes (where merge strategy matters)
+            single_lora_targets = {}
+            multi_lora_targets = {}
+            for pfx, tgt in all_key_targets.items():
+                if prefix_stats.get(pfx, {}).get("n_loras", 0) <= 1:
+                    single_lora_targets[pfx] = tgt
+                else:
+                    multi_lora_targets[pfx] = tgt
+            # Sort multi-LoRA prefixes by conflict_ratio descending (highest conflict first)
+            sorted_multi = sorted(
+                multi_lora_targets.keys(),
+                key=lambda p: prefix_stats.get(p, {}).get("conflict_ratio", 0.0),
+                reverse=True,
+            )
+            # Keep every Nth prefix from the sorted list
+            subsampled_multi = {p: multi_lora_targets[p] for p in sorted_multi[::step]}
+            scoring_targets = {**single_lora_targets, **subsampled_multi}
+            scoring_cache = {**_analysis_cache, "all_key_targets": scoring_targets}
+            logging.info(f"[LoRA AutoTuner] Scoring speed '{scoring_speed}': "
+                         f"scoring {len(scoring_targets)}/{len(all_key_targets)} prefixes "
+                         f"({len(single_lora_targets)} single-LoRA + "
+                         f"{len(subsampled_multi)}/{len(multi_lora_targets)} multi-LoRA)")
+
         # --- Phase 2: Merge top-N and measure ---
         # Initialize diff cache for Phase 2
         _diff_cache = None
@@ -4704,7 +4740,9 @@ class LoRAAutoTuner(LoRAOptimizer):
         best_model = None
         best_clip = None
         best_lora_data = None
+        best_analysis_report = ""
         best_score = -1.0
+        best_config = None
         logging.info(f"[LoRA AutoTuner] Phase 2: Merging and measuring top {len(top_candidates)} candidates...")
 
         for rank_idx, (h_score, config) in enumerate(top_candidates):
@@ -4737,7 +4775,7 @@ class LoRAAutoTuner(LoRAOptimizer):
                 normalize_keys=normalize_keys,
                 behavior_profile="v1.2",
                 architecture_preset=architecture_preset,
-                _analysis_cache=_analysis_cache,
+                _analysis_cache=scoring_cache,
                 _diff_cache=_diff_cache,
                 _skip_report=True,
             )
@@ -4758,17 +4796,23 @@ class LoRAAutoTuner(LoRAOptimizer):
                          f"(merge {t_elapsed - t_score_elapsed:.1f}s + score {t_score_elapsed:.1f}s)")
             pbar.update(1)
 
-            # Keep only the best model in memory, free the rest immediately
-            if measured["composite_score"] > best_score:
+            if use_subsampling:
+                # When subsampling, discard all candidates — final full merge comes after
+                del merged_model, merged_clip, lora_data
+            elif measured["composite_score"] > best_score:
+                # Keep only the best model in memory, free the rest immediately
                 # Free previous best before replacing
                 del best_model, best_clip, best_lora_data
                 best_model = merged_model
                 best_clip = merged_clip
                 best_lora_data = lora_data
-                best_score = measured["composite_score"]
+                best_analysis_report = _report
             else:
                 # Discard this candidate's heavy objects immediately
                 del merged_model, merged_clip, lora_data
+            if measured["composite_score"] > best_score:
+                best_score = measured["composite_score"]
+                best_config = config
             del m_patches, c_patches  # Drop patch-dict references so tensors can free
             gc.collect()
             if use_gpu:
@@ -4786,6 +4830,38 @@ class LoRAAutoTuner(LoRAOptimizer):
                     "norm_cv": measured.get("norm_cv", 0.0),
                 },
             })
+
+        # Final full merge when subsampling was used
+        if use_subsampling and best_config is not None:
+            logging.info(f"[LoRA AutoTuner] Final merge with winning config "
+                         f"({best_config['merge_mode']}, {best_config['merge_quality']})...")
+            t_final = time.time()
+            strategy_override = best_config["merge_mode"] if best_config["optimization_mode"] == "global" else ""
+            best_model, best_clip, best_analysis_report, best_lora_data = super().optimize_merge(
+                model, lora_stack, output_strength,
+                clip=clip,
+                clip_strength_multiplier=clip_strength_multiplier,
+                auto_strength=best_config["auto_strength"],
+                optimization_mode=best_config["optimization_mode"],
+                sparsification=best_config["sparsification"],
+                sparsification_density=best_config["sparsification_density"],
+                dare_dampening=best_config["dare_dampening"],
+                merge_quality=best_config["merge_quality"],
+                merge_strategy_override=strategy_override,
+                free_vram_between_passes="disabled",
+                vram_budget=vram_budget,
+                cache_patches="disabled",
+                compress_patches="disabled",
+                svd_device="gpu",
+                normalize_keys=normalize_keys,
+                behavior_profile="v1.2",
+                architecture_preset=architecture_preset,
+                _analysis_cache=_analysis_cache,
+                _diff_cache=_diff_cache,
+                _skip_report=True,
+            )
+            logging.info(f"[LoRA AutoTuner] Final merge complete ({time.time() - t_final:.1f}s)")
+            pbar.update(1)
 
         if _diff_cache is not None:
             n_ram = len(_diff_cache._ram_store)
@@ -4845,22 +4921,23 @@ class LoRAAutoTuner(LoRAOptimizer):
         suggested_max = best_lora_data.get("suggested_max_strength") if best_lora_data else None
         report = self._build_autotuner_report(
             results, tuner_data["analysis_summary"], output_strength,
-            suggested_max_strength=suggested_max)
+            suggested_max_strength=suggested_max, scoring_speed=scoring_speed)
 
         # Extract return values, then free heavy intermediates
         ret_model = best["merged_model"]
         ret_clip = best["merged_clip"]
         ret_lora_data = best.get("lora_data")
+        ret_analysis_report = best_analysis_report
         for r in results:
             r.pop("merged_model", None)
             r.pop("merged_clip", None)
             r.pop("lora_data", None)
-        del results, best, best_model, best_clip, best_lora_data, active_loras
+        del results, best, best_model, best_clip, best_lora_data, best_analysis_report, active_loras
         gc.collect()
         if use_gpu:
             torch.cuda.empty_cache()
 
-        result = (ret_model, ret_clip, report, tuner_data, ret_lora_data)
+        result = (ret_model, ret_clip, report, ret_analysis_report, tuner_data, ret_lora_data)
         if cache_patches == "enabled":
             self._autotuner_cache = {at_cache_key: result}
         else:
@@ -4934,7 +5011,7 @@ class LoRAAutoTuner(LoRAOptimizer):
             logging.warning(f"[LoRA AutoTuner] Failed to save dataset entry: {e}")
 
     def _build_autotuner_report(self, results, analysis_summary, output_strength,
-                               suggested_max_strength=None):
+                               suggested_max_strength=None, scoring_speed="full"):
         """Build the ranked report for AutoTuner results."""
         lines = []
         lines.append("=" * 54)
@@ -4950,6 +5027,8 @@ class LoRAAutoTuner(LoRAOptimizer):
         lines.append(f"    Output strength: {output_strength}")
         if suggested_max_strength is not None:
             lines.append(f"    Suggested max output_strength: {suggested_max_strength:.2f}")
+        if scoring_speed != "full":
+            lines.append(f"    Scoring speed: {scoring_speed} (subsampled prefix scoring)")
         lines.append("")
         lines.append("  " + "-" * 38)
         lines.append(f"  Top {len(results)} Configurations")
@@ -4992,10 +5071,10 @@ class LoRAAutoTuner(LoRAOptimizer):
                    architecture_preset="auto", record_dataset="disabled",
                    cache_patches="enabled",
                    diff_cache_mode="disabled", diff_cache_ram_pct=0.5,
-                   vram_budget=0.0):
+                   vram_budget=0.0, scoring_speed="full"):
         return (id(lora_stack), output_strength, clip_strength_multiplier, top_n,
                 normalize_keys, scoring_svd, scoring_device, architecture_preset,
-                vram_budget, record_dataset)
+                vram_budget, record_dataset, scoring_speed)
 
 
 class LoRAMergeSelector(LoRAOptimizer):
