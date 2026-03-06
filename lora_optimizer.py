@@ -4552,6 +4552,12 @@ class LoRAAutoTuner(LoRAOptimizer):
         gc.collect()
 
         # --- Phase 2: Merge top-N and measure ---
+        # Initialize diff cache for Phase 2
+        _diff_cache = None
+        if diff_cache_mode != "disabled":
+            _diff_cache = _DiffCache(mode=diff_cache_mode)
+            logging.info(f"[LoRA AutoTuner] Diff cache enabled (mode={diff_cache_mode})")
+
         # Only keep the current best in memory to avoid accumulating ~40GB per candidate.
         top_candidates = scored[:top_n]
         results = []
@@ -4588,6 +4594,7 @@ class LoRAAutoTuner(LoRAOptimizer):
                 behavior_profile="v1.2",
                 architecture_preset=architecture_preset,
                 _analysis_cache=_analysis_cache,
+                _diff_cache=_diff_cache,
                 _skip_report=True,
             )
 
@@ -4636,6 +4643,9 @@ class LoRAAutoTuner(LoRAOptimizer):
                 },
             })
 
+        if _diff_cache is not None:
+            _diff_cache.clear()
+            del _diff_cache
         del all_magnitude_samples
         del _analysis_cache
         prefix_stats.clear()
