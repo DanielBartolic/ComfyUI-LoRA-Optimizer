@@ -372,9 +372,9 @@ class _DiffCache:
         def _load():
             for k in disk_keys:
                 try:
-                    self._prefetch_buf[k] = torch.load(
-                        self._disk_store[k], map_location="cpu",
-                        weights_only=True, mmap=True)
+                    import numpy as np
+                    arr = np.load(self._disk_store[k], mmap_mode='r')
+                    self._prefetch_buf[k] = torch.from_numpy(arr.copy())
                 except Exception:
                     pass
         self._prefetch_thread = threading.Thread(target=_load, daemon=True)
@@ -395,8 +395,10 @@ class _DiffCache:
             val = self._ram_store[key]
             return val.to(device) if device is not None else val.clone()
         if key in self._disk_store:
-            return torch.load(self._disk_store[key], map_location=device or "cpu",
-                              weights_only=True, mmap=True)
+            import numpy as np
+            arr = np.load(self._disk_store[key], mmap_mode='r')
+            t = torch.from_numpy(arr.copy())
+            return t.to(device) if device is not None else t
         return None
 
     def put(self, key, tensor):
@@ -406,10 +408,10 @@ class _DiffCache:
         tensor_bytes = cached.nelement() * cached.element_size()
         if self._use_disk(tensor_bytes):
             try:
-                import hashlib
+                import hashlib, numpy as np
                 name_hash = hashlib.sha256(f"{key[0]}_{key[1]}".encode()).hexdigest()[:16]
-                path = os.path.join(self._cache_dir, f"{name_hash}.pt")
-                torch.save(cached, path)
+                path = os.path.join(self._cache_dir, f"{name_hash}.npy")
+                np.save(path, cached.numpy())
                 self._disk_store[key] = path
             except Exception as e:
                 logging.warning(f"[DiffCache] Failed to write cache file: {e}")
