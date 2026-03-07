@@ -46,6 +46,7 @@ _ARCH_PRESETS = {
         "magnitude_ratio_total_sign": 2.0,
         "alignment_threshold": 0.1,
         "suggested_max_strength_cap": 3.0,
+        "auto_strength_orthogonal_floor": 0.85,
         "display_name": "SD/SDXL UNet",
     },
     "dit": {
@@ -61,6 +62,7 @@ _ARCH_PRESETS = {
         "magnitude_ratio_total_sign": 2.0,
         "alignment_threshold": 0.1,
         "suggested_max_strength_cap": 5.0,
+        "auto_strength_orthogonal_floor": 0.85,
         "display_name": "DiT (Flux/WAN/Z-Image/LTX/HunyuanVideo)",
     },
     "llm": {
@@ -76,6 +78,7 @@ _ARCH_PRESETS = {
         "magnitude_ratio_total_sign": 2.0,
         "alignment_threshold": 0.1,
         "suggested_max_strength_cap": 3.0,
+        "auto_strength_orthogonal_floor": 0.9,
         "display_name": "LLM (Qwen/LLaMA)",
     },
 }
@@ -86,6 +89,10 @@ _ARCH_TO_PRESET = {
     "acestep": "dit",
     "qwen_image": "llm",
 }
+
+# Video architectures where orthogonal LoRAs teach independent motions —
+# their energy should add naturally without scaling down.
+_VIDEO_ARCH_ORTHOGONAL_FLOOR = {"wan": 1.0, "ltx": 1.0}
 
 
 def _resolve_arch_preset(arch_override, detected_arch):
@@ -2548,6 +2555,12 @@ class LoRAOptimizer(_LoRAMergeBase):
                     "default": "enabled",
                     "tooltip": "Automatically turns down individual LoRA strengths when combining many LoRAs to avoid oversaturated or distorted results. Useful when stacking 3+ LoRAs."
                 }),
+                "auto_strength_floor": ("FLOAT", {
+                    "default": -1.0, "min": -1.0, "max": 1.0, "step": 0.05,
+                    "tooltip": "Minimum scale factor for auto-strength when LoRAs are orthogonal (independent). "
+                               "-1 = auto (1.0 for video models like Wan/LTX to preserve motion, 0.85 for image models). "
+                               "Set manually to override — e.g. 0.9 for less reduction, 1.0 to disable reduction for orthogonal LoRAs entirely."
+                }),
                 "free_vram_between_passes": (["disabled", "enabled"], {
                     "default": "disabled",
                     "tooltip": "Frees GPU memory between processing steps. Enable if you're running out of VRAM. Barely affects speed."
@@ -2639,7 +2652,7 @@ class LoRAOptimizer(_LoRAMergeBase):
     DESCRIPTION = "Auto-analyzes LoRA stack and selects optimal merge strategy per weight group. Outputs merged model + analysis report. Best for style/character LoRAs — apply edit, distillation (LCM/Turbo/Hyper), or DPO LoRAs via a standard Load LoRA node instead."
 
     @staticmethod
-    def _compute_cache_key(lora_stack, output_strength, clip_strength_multiplier, auto_strength, optimization_mode="per_prefix", compress_patches="non_ties", svd_device="gpu", normalize_keys="disabled", sparsification="disabled", sparsification_density=0.7, dare_dampening=0.0, merge_strategy_override="", merge_quality="standard", behavior_profile="v1.2", architecture_preset="auto"):
+    def _compute_cache_key(lora_stack, output_strength, clip_strength_multiplier, auto_strength, optimization_mode="per_prefix", compress_patches="non_ties", svd_device="gpu", normalize_keys="disabled", sparsification="disabled", sparsification_density=0.7, dare_dampening=0.0, merge_strategy_override="", merge_quality="standard", behavior_profile="v1.2", architecture_preset="auto", auto_strength_floor=-1.0):
         """
         Build a deterministic SHA-256 hash (16 hex chars) from the stack
         configuration. Used by IS_CHANGED to let ComfyUI skip re-execution
@@ -2662,12 +2675,13 @@ class LoRAOptimizer(_LoRAMergeBase):
                     entries.append((str(item.get("name", "")), float(item.get("strength", 0)), cm, kf))
             entries.sort()
             h.update(json.dumps(entries).encode())
-        h.update(f"|os={output_strength}|csm={clip_strength_multiplier}|as={auto_strength}|om={optimization_mode}|cp={compress_patches}|sd={svd_device}|nk={normalize_keys}|sp={sparsification}|spd={sparsification_density}|dd={dare_dampening}|mso={merge_strategy_override}|mq={merge_quality}|bp={behavior_profile}|ap={architecture_preset}".encode())
+        h.update(f"|os={output_strength}|csm={clip_strength_multiplier}|as={auto_strength}|om={optimization_mode}|cp={compress_patches}|sd={svd_device}|nk={normalize_keys}|sp={sparsification}|spd={sparsification_density}|dd={dare_dampening}|mso={merge_strategy_override}|mq={merge_quality}|bp={behavior_profile}|ap={architecture_preset}|asf={auto_strength_floor}".encode())
         return h.hexdigest()[:16]
 
     @classmethod
     def IS_CHANGED(cls, model, lora_stack, output_strength, clip=None,
                    clip_strength_multiplier=1.0, auto_strength="disabled",
+                   auto_strength_floor=-1.0,
                    free_vram_between_passes="disabled", vram_budget=0.0,
                    optimization_mode="per_prefix",
                    cache_patches="enabled", compress_patches="non_ties",
@@ -2684,7 +2698,8 @@ class LoRAOptimizer(_LoRAMergeBase):
                                           sparsification, sparsification_density,
                                           dare_dampening,
                                           merge_strategy_override, merge_quality,
-                                          behavior_profile, architecture_preset)
+                                          behavior_profile, architecture_preset,
+                                          auto_strength_floor)
         cache_key = f"{base_key}|mid={id(model)}|ss={settings_source}"
         if settings_source == "from_autotuner" and tuner_data is not None:
             return f"{cache_key}|at={id(tuner_data)}"
@@ -3004,7 +3019,7 @@ class LoRAOptimizer(_LoRAMergeBase):
 
         return max(arch_preset["density_clamp_min"], min(arch_preset["density_clamp_max"], above_noise))
 
-    def _compute_auto_strengths(self, active_loras, lora_stats, pairwise_similarities=None, arch_preset=None):
+    def _compute_auto_strengths(self, active_loras, lora_stats, pairwise_similarities=None, arch_preset=None, detected_arch=None, auto_strength_floor=-1.0):
         """
         Compute reduced per-LoRA strengths using interference-aware energy
         normalization. Uses pairwise cosine similarity to account for
@@ -3072,6 +3087,25 @@ class LoRAOptimizer(_LoRAMergeBase):
         else:
             scale = 1.0
 
+        # Architecture-aware orthogonal floor: when LoRAs are orthogonal
+        # (independent), video models should preserve full energy because
+        # orthogonal video LoRAs teach independent motions.  Image models
+        # get a modest floor to prevent over-reduction while still dampening.
+        floor_applied = False
+        if pairwise_similarities:
+            avg_cos = sum(pairwise_similarities.values()) / len(pairwise_similarities)
+            alignment_thresh = arch_preset["alignment_threshold"]
+            if abs(avg_cos) <= alignment_thresh:
+                if auto_strength_floor >= 0:
+                    floor = auto_strength_floor
+                else:
+                    floor = _VIDEO_ARCH_ORTHOGONAL_FLOOR.get(
+                        detected_arch,
+                        arch_preset.get("auto_strength_orthogonal_floor", 0.85))
+                if scale < floor:
+                    scale = floor
+                    floor_applied = True
+
         # Apply scale to all strengths
         new_strengths = []
         for i in range(n):
@@ -3082,6 +3116,9 @@ class LoRAOptimizer(_LoRAMergeBase):
 
         # Build reasoning
         reasoning.append(f"Scale factor: {scale:.4f}")
+        if floor_applied:
+            arch_label = detected_arch or "unknown"
+            reasoning.append(f"  (orthogonal floor {floor:.2f} applied for {arch_label} — preserving independent contributions)")
         if pairwise_similarities:
             avg_cos = sum(pairwise_similarities.values()) / len(pairwise_similarities)
             orthogonal_energy = math.sqrt(orthogonal_energy_sq)
@@ -3495,6 +3532,7 @@ class LoRAOptimizer(_LoRAMergeBase):
 
     def execute_node(self, model, lora_stack, output_strength, clip=None,
                      clip_strength_multiplier=1.0, auto_strength="enabled",
+                     auto_strength_floor=-1.0,
                      free_vram_between_passes="disabled", vram_budget=0.0,
                      optimization_mode="per_prefix", cache_patches="enabled",
                      compress_patches="non_ties", svd_device="gpu",
@@ -3550,6 +3588,7 @@ class LoRAOptimizer(_LoRAMergeBase):
             clip=clip,
             clip_strength_multiplier=clip_strength_multiplier,
             auto_strength=auto_strength,
+            auto_strength_floor=auto_strength_floor,
             free_vram_between_passes=free_vram_between_passes,
             vram_budget=vram_budget,
             optimization_mode=optimization_mode,
@@ -3568,7 +3607,7 @@ class LoRAOptimizer(_LoRAMergeBase):
 
         return result
 
-    def optimize_merge(self, model, lora_stack, output_strength, clip=None, clip_strength_multiplier=1.0, auto_strength="disabled", free_vram_between_passes="disabled", vram_budget=0.0, optimization_mode="per_prefix", cache_patches="enabled", compress_patches="non_ties", svd_device="gpu", normalize_keys="disabled", sparsification="disabled", sparsification_density=0.7, dare_dampening=0.0, merge_strategy_override="", merge_quality="standard", behavior_profile="v1.2", architecture_preset="auto", _analysis_cache=None, _diff_cache=None, _skip_report=False):
+    def optimize_merge(self, model, lora_stack, output_strength, clip=None, clip_strength_multiplier=1.0, auto_strength="disabled", auto_strength_floor=-1.0, free_vram_between_passes="disabled", vram_budget=0.0, optimization_mode="per_prefix", cache_patches="enabled", compress_patches="non_ties", svd_device="gpu", normalize_keys="disabled", sparsification="disabled", sparsification_density=0.7, dare_dampening=0.0, merge_strategy_override="", merge_quality="standard", behavior_profile="v1.2", architecture_preset="auto", _analysis_cache=None, _diff_cache=None, _skip_report=False):
         """
         Main entry point. Two-pass streaming architecture:
         Pass 1: Compute diffs per-prefix, sample conflicts + magnitudes, discard diffs
@@ -3630,7 +3669,8 @@ class LoRAOptimizer(_LoRAMergeBase):
                                             sparsification, sparsification_density,
                                             dare_dampening,
                                             merge_strategy_override, merge_quality,
-                                            behavior_profile, architecture_preset)
+                                            behavior_profile, architecture_preset,
+                                            auto_strength_floor)
         # Include model identity so switching base models invalidates the cache
         cache_key = f"{cache_key}|mid={id(model)}"
         if cache_patches == "enabled" and cache_key in self._merge_cache:
@@ -3912,7 +3952,9 @@ class LoRAOptimizer(_LoRAMergeBase):
         if auto_strength == "enabled":
             new_strengths, strength_reasoning = self._compute_auto_strengths(
                 active_loras, lora_stats, pairwise_similarities=pairwise_similarities,
-                arch_preset=arch_preset)
+                arch_preset=arch_preset,
+                detected_arch=getattr(self, '_detected_arch', None),
+                auto_strength_floor=auto_strength_floor)
 
             for i in range(len(active_loras)):
                 orig = active_loras[i]["strength"]
@@ -4550,6 +4592,7 @@ class LoRAOptimizerSimple(LoRAOptimizer):
 
     _SIMPLE_DEFAULTS = dict(
         auto_strength="enabled",
+        auto_strength_floor=-1.0,
         free_vram_between_passes="disabled",
         vram_budget=0.0,
         optimization_mode="per_prefix",
@@ -4636,6 +4679,12 @@ class LoRAAutoTuner(LoRAOptimizer):
                     "default": "auto",
                     "tooltip": "Architecture-aware threshold tuning. 'auto' detects from LoRA keys."
                 }),
+                "auto_strength_floor": ("FLOAT", {
+                    "default": -1.0, "min": -1.0, "max": 1.0, "step": 0.05,
+                    "tooltip": "Minimum scale factor for auto-strength when LoRAs are orthogonal (independent). "
+                               "-1 = auto (1.0 for video models like Wan/LTX to preserve motion, 0.85 for image models). "
+                               "Set manually to override — e.g. 0.9 for less reduction, 1.0 to disable reduction for orthogonal LoRAs entirely."
+                }),
                 "record_dataset": (["disabled", "enabled"], {
                     "default": "disabled",
                     "tooltip": "Record analysis metrics and scored configs to a JSONL dataset file for threshold tuning research. Saved to lora_optimizer_reports/autotuner_dataset.jsonl."
@@ -4687,7 +4736,8 @@ class LoRAAutoTuner(LoRAOptimizer):
     def auto_tune(self, model, lora_stack, output_strength, clip=None,
                   clip_strength_multiplier=1.0, top_n=3, normalize_keys="disabled",
                   scoring_svd="disabled", scoring_device="gpu",
-                  architecture_preset="auto", record_dataset="disabled",
+                  architecture_preset="auto", auto_strength_floor=-1.0,
+                  record_dataset="disabled",
                   cache_patches="enabled",
                   diff_cache_mode="disabled", diff_cache_ram_pct=0.5, vram_budget=0.0,
                   scoring_speed="full", output_mode="merge"):
@@ -4979,6 +5029,7 @@ class LoRAAutoTuner(LoRAOptimizer):
                 clip=clip,
                 clip_strength_multiplier=clip_strength_multiplier,
                 auto_strength=config["auto_strength"],
+                auto_strength_floor=auto_strength_floor,
                 optimization_mode=config["optimization_mode"],
                 sparsification=config["sparsification"],
                 sparsification_density=config["sparsification_density"],
@@ -5060,6 +5111,7 @@ class LoRAAutoTuner(LoRAOptimizer):
                 clip=clip,
                 clip_strength_multiplier=clip_strength_multiplier,
                 auto_strength=best_config["auto_strength"],
+                auto_strength_floor=auto_strength_floor,
                 optimization_mode=best_config["optimization_mode"],
                 sparsification=best_config["sparsification"],
                 sparsification_density=best_config["sparsification_density"],
