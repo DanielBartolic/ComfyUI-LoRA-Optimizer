@@ -1085,19 +1085,33 @@ class _LoRAMergeBase:
                         # Independent decompositions (e.g., SVD-compressed) —
                         # expand to full-rank diffs, then fuse as a single diff patch
                         parts = []
+                        store_dtype = q_data[0].dtype
                         for comp_data in [q_data, k_data, v_data]:
                             alpha = comp_data[2] if comp_data[2] is not None else float(comp_data[1].shape[0])
                             rank = comp_data[1].shape[0]
                             diff = torch.mm(comp_data[0].float(), comp_data[1].float()) * (alpha / rank)
                             parts.append(diff)
                         fused_diff = torch.cat(parts, dim=0)
+                        # Downcast back to original dtype to avoid doubling memory/file size
+                        if store_dtype not in (torch.float32, torch.float64):
+                            fused_diff = fused_diff.to(store_dtype)
                         fused[fused_key] = ("diff", (fused_diff,))
                 elif any(hasattr(p, 'weights') for p in [q_patch, k_patch, v_patch]):
                     # LoKr/LoHa or mixed adapter types: expand to diff, then fuse
                     parts = []
+                    # Try to detect the native dtype before float32 expansion
+                    store_dtype = torch.float16
+                    for p in [q_patch, k_patch, v_patch]:
+                        if hasattr(p, 'weights') and p.weights[0] is not None:
+                            dt = p.weights[0].dtype
+                            if dt not in (torch.float32, torch.float64):
+                                store_dtype = dt
+                                break
                     for comp_patch in [q_patch, k_patch, v_patch]:
                         parts.append(self._expand_patch_to_diff(comp_patch))
                     fused_diff = torch.cat(parts, dim=0)
+                    if store_dtype not in (torch.float32, torch.float64):
+                        fused_diff = fused_diff.to(store_dtype)
                     fused[fused_key] = ("diff", (fused_diff,))
                 else:
                     # Unknown patch format — pass through unfused
@@ -1727,16 +1741,19 @@ class _LoRAMergeBase:
 
     @staticmethod
     @torch.no_grad()
-    def _compress_to_lowrank(diff, rank, svd_device=None):
+    def _compress_to_lowrank(diff, rank, svd_device=None, output_dtype=None):
         """
         Re-compress a full-rank diff tensor to low-rank via truncated SVD.
         Returns ("lora", (mat_up, mat_down, alpha=rank, None)) so ComfyUI
         computes up @ down * (rank/rank) = up @ down (no extra scaling).
 
         svd_device: where to run SVD. GPU is ~10-50x faster. CPU if None.
+        output_dtype: cast output to this dtype. None = same as input (fp16 stays fp16).
         For a [4096, 4096] diff at rank 128: 64MB → 2MB (~32x reduction).
         """
         original_shape = diff.shape
+        if output_dtype is None:
+            output_dtype = diff.dtype
         # Reshape to 2D for SVD: [out_features, in_features]
         mat = diff.reshape(original_shape[0], -1).float()
         rank = min(rank, min(mat.shape))
@@ -1750,8 +1767,8 @@ class _LoRAMergeBase:
         # Reconstruct as: mat_up = U * sqrt(S), mat_down = sqrt(S) * V^T
         # Return on CPU for storage (ComfyUI moves to device when applying)
         sqrt_S = S.sqrt()
-        mat_up = (U * sqrt_S.unsqueeze(0)).cpu()    # [out, rank]
-        mat_down = ((V * sqrt_S.unsqueeze(0)).T).cpu()  # [rank, in]
+        mat_up = (U * sqrt_S.unsqueeze(0)).to(output_dtype).cpu()    # [out, rank]
+        mat_down = ((V * sqrt_S.unsqueeze(0)).T).to(output_dtype).cpu()  # [rank, in]
         del U, S, V, sqrt_S
         # alpha=rank so ComfyUI computes: up @ down * (rank/rank) = up @ down
         return LoRAAdapter(set(), (mat_up, mat_down, float(rank), None, None, None))
@@ -4125,9 +4142,9 @@ class LoRAOptimizer(_LoRAMergeBase):
             torch.cuda.empty_cache()
 
         # Resolve compress_patches rank (sum of input LoRA ranks)
+        sum_rank = sum(int(stat["avg_rank"]) for stat in lora_stats if stat["avg_rank"] > 0)
         compress_rank = 0  # 0 = disabled
         if compress_patches in ("non_ties", "all"):
-            sum_rank = sum(int(stat["avg_rank"]) for stat in lora_stats if stat["avg_rank"] > 0)
             compress_rank = max(sum_rank, 64)  # floor at 64
             logging.info(f"[LoRA Optimizer] Patch compression: {compress_patches} (rank {compress_rank} from sum of input LoRA ranks)")
 
@@ -4667,6 +4684,7 @@ class LoRAOptimizer(_LoRAMergeBase):
             "output_strength": output_strength,
             "clip_strength": clip_strength_out,
             "suggested_max_strength": suggested_max_strength,
+            "sum_rank": max(sum_rank, 64),
         }
 
         # Cache patches for re-use (single entry to limit memory)
@@ -5716,22 +5734,43 @@ class SaveMergedLoRA:
 
         auto_rank = save_rank == 0
 
-        # Auto mode: collect ranks from existing LoRAAdapter patches to use
-        # as the fallback rank for any full-rank diffs that need compression
+        # Auto mode: determine rank for compressing full-rank diffs.
+        # Priority: 1) existing LoRAAdapter ranks, 2) sum_rank from optimizer, 3) fallback 128
         if auto_rank:
             existing_ranks = []
             for patch in list(model_patches.values()) + list(clip_patches.values()):
                 if isinstance(patch, LoRAAdapter):
                     existing_ranks.append(patch.weights[1].shape[0])  # mat_down rows = rank
                 # LoKr/LoHa factor ranks (1-8) are not comparable to LoRA ranks —
-                # skip them so the 128 fallback kicks in instead
-            # Use the most common rank, or 128 as a safe default
+                # skip them so the fallback kicks in instead
             if existing_ranks:
                 fallback_rank = max(set(existing_ranks), key=existing_ranks.count)
+            elif lora_data.get("sum_rank", 0) > 0:
+                # Use sum of input LoRA ranks from the optimizer (e.g., QKV refusion
+                # may have expanded all LoRAAdapters to full-rank diffs)
+                fallback_rank = lora_data["sum_rank"]
             else:
                 fallback_rank = 128
             logging.info(f"[Save Merged LoRA] Auto rank: using rank {fallback_rank} for full-rank patches "
                          f"(from {len(existing_ranks)} low-rank patches)")
+
+        # Detect native storage dtype (fp16/bf16) from patches for output.
+        # SVD compression produces float32 internally, but saved LoRAs should
+        # match the original weight precision to avoid doubling file size.
+        save_dtype = None
+        for patch in list(model_patches.values()) + list(clip_patches.values()):
+            if isinstance(patch, tuple) and patch[0] == "diff":
+                dt = patch[1][0].dtype
+            elif hasattr(patch, 'weights') and patch.weights[0] is not None:
+                dt = patch.weights[0].dtype
+            else:
+                continue
+            if dt not in (torch.float32, torch.float64):
+                save_dtype = dt
+                break
+        if save_dtype is None:
+            save_dtype = torch.float16
+        logging.info(f"[Save Merged LoRA] Output dtype: {save_dtype}")
 
         state_dict = {}
 
