@@ -3063,9 +3063,12 @@ class LoRAOptimizer(_LoRAMergeBase):
         # Reference energy: what the strongest single LoRA contributes alone
         reference_energy = max(effective)
 
-        # Scale factor
+        # Scale factor — capped at 1.0 to prevent amplification.
+        # For opposing LoRAs (negative cos_sim), energy_sq shrinks and scale
+        # would exceed 1.0 (e.g. 1.58x at cos_sim=-0.8), boosting both LoRAs
+        # instead of letting them naturally attenuate each other.
         if current_energy > 0:
-            scale = reference_energy / current_energy
+            scale = min(reference_energy / current_energy, 1.0)
         else:
             scale = 1.0
 
@@ -3918,6 +3921,7 @@ class LoRAOptimizer(_LoRAMergeBase):
             pf_density = density
             pf_sign = sign_method
             pf_orthogonal = False
+            pf_opposing = False
             if optimization_mode == "weighted_sum_only":
                 pf_mode = "weighted_sum"
                 pf_n_loras = prefix_stats.get(lora_prefix, {}).get("n_loras", 0)
@@ -3939,17 +3943,21 @@ class LoRAOptimizer(_LoRAMergeBase):
                         arch_preset=arch_preset,
                         precomputed_density=pf.get("precomputed_density"),
                     )
-                    # Upgrade weighted_average → slerp for 2+ non-orthogonal LoRAs.
-                    # SLERP preserves magnitude better (no cancellation from opposing vectors).
-                    # Skip for orthogonal LoRAs: SLERP's norm correction targets the arithmetic
-                    # mean of input norms, which is ~1.6x higher than weighted_average's result
-                    # for 3 orthogonal vectors.  That extra energy causes a "burned" look.
-                    # weighted_average divides by N, naturally reducing per-LoRA influence.
-                    pf_cos = abs(pf.get("avg_cos_sim", 0.0))
-                    pf_orthogonal = pf_cos < arch_preset["orthogonal_cos_sim_max"]
+                    # Upgrade weighted_average → slerp for 2+ positively-aligned LoRAs.
+                    # SLERP preserves magnitude better than weighted_average's /N reduction.
+                    # Skip when inappropriate:
+                    #  - Orthogonal (|cos| < 0.25): SLERP's norm correction gives ~1.6x
+                    #    more energy than weighted_average for 3 orthogonal vectors.
+                    #  - Opposing (cos < 0): SLERP interpolates between opposing directions
+                    #    while preserving magnitude; combined with auto-strength boosting
+                    #    (scale > 1.0 for opposing pairs), this amplifies artifacts.
+                    # Both cases benefit from weighted_average's /N magnitude reduction.
+                    pf_raw_cos = pf.get("avg_cos_sim", 0.0)
+                    pf_orthogonal = abs(pf_raw_cos) < arch_preset["orthogonal_cos_sim_max"]
+                    pf_opposing = pf_raw_cos < 0
                     if (pf_mode == "weighted_average" and pf["n_loras"] >= 2
                             and behavior_profile == "v1.2"
-                            and not pf_orthogonal):
+                            and not pf_orthogonal and not pf_opposing):
                         pf_mode = "slerp"
 
             # Apply merge strategy override from Conflict Editor (takes priority over auto-selection)
@@ -4136,13 +4144,17 @@ class LoRAOptimizer(_LoRAMergeBase):
             input_norms_mean = (sum(d.float().norm().item() * abs(w) for d, w in diffs_list)
                                 / len(diffs_list)) if diffs_list else 0.0
 
-            # For orthogonal weighted_average, force standard quality.
+            # For orthogonal/opposing weighted_average, force standard quality.
             # TALL-masks classifies most positions as "selfish" for orthogonal
             # LoRAs (each dominates independent positions) and adds them back at
             # full strength AFTER the merge, bypassing weighted_average's /N
             # normalization.  This converts weighted_average → weighted_sum (~Nx energy).
+            # Opposing LoRAs have a similar problem: the magnitude calibration
+            # in enhanced quality doesn't account for the directional cancellation
+            # that weighted_average provides.
             pf_quality = merge_quality
-            if (pf_mode == "weighted_average" and pf_orthogonal):
+            if (pf_mode == "weighted_average"
+                    and (pf_orthogonal or pf_opposing)):
                 pf_quality = "standard"
 
             merged_diff = self._merge_diffs(
