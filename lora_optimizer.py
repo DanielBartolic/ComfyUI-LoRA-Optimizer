@@ -5977,6 +5977,8 @@ class LoRACompatibilityAnalyzer(LoRAOptimizer):
     def INPUT_TYPES(cls):
         return {
             "required": {
+                "enabled": ("BOOLEAN", {"default": False,
+                    "tooltip": "Toggle on to run the analysis. Off by default so it doesn't slow down normal queue execution."}),
                 "model": ("MODEL", {"tooltip": "Base model for key mapping and target shapes."}),
                 "lora_stack": ("LORA_STACK", {"tooltip": "The LoRA stack to analyze for compatibility."}),
             },
@@ -5993,11 +5995,15 @@ class LoRACompatibilityAnalyzer(LoRAOptimizer):
     DESCRIPTION = "Analyzes pairwise LoRA compatibility and recommends merge groups. No merge is performed — use this to plan which LoRAs to combine before merging."
 
     @classmethod
-    def IS_CHANGED(cls, **kwargs):
-        """Always re-execute — analysis-only node, no caching."""
-        return float("NaN")
+    def IS_CHANGED(cls, enabled, **kwargs):
+        if not enabled:
+            return "disabled"  # stable value → cached, effectively skipped
+        return float("NaN")  # always re-execute when enabled
 
-    def analyze(self, model, lora_stack, clip=None):
+    def analyze(self, enabled, model, lora_stack, clip=None):
+        if not enabled:
+            return ("Analysis disabled. Toggle 'enabled' to run.", self._empty_image())
+
         if not lora_stack or len(lora_stack) == 0:
             return ("No LoRAs in stack.", self._empty_image())
 
