@@ -3173,7 +3173,10 @@ class LoRAOptimizer(_LoRAMergeBase):
 
         # Near-orthogonal LoRAs: ~50% sign conflict is the base rate for
         # independent vectors, not actual semantic conflict. TIES trimming
-        # destroys both signals. Use weighted_average (→ SLERP per-prefix).
+        # destroys both signals. Use weighted_average which divides by N,
+        # naturally reducing per-LoRA influence. NOT upgraded to SLERP:
+        # SLERP's norm correction preserves magnitude, giving ~1.6x more
+        # energy than weighted_average for 3 orthogonal vectors ("burned" look).
         if (behavior_profile in ("v1.2", "no_slerp")
                 and abs(avg_cos_sim) < arch_preset["orthogonal_cos_sim_max"]
                 and avg_conflict_ratio < arch_preset["orthogonal_conflict_max"]):
@@ -3181,7 +3184,7 @@ class LoRAOptimizer(_LoRAMergeBase):
             reasoning.append(f"Cosine similarity {avg_cos_sim:.2f} near zero (orthogonal LoRAs) — "
                              f"sign conflict {avg_conflict_ratio:.1%} is base-rate noise, not real conflict")
             if behavior_profile == "v1.2":
-                reasoning.append("  Using weighted_average (upgraded to SLERP per-prefix) to preserve both signals")
+                reasoning.append("  Using weighted_average to preserve both signals (no SLERP upgrade — orthogonal vectors need magnitude reduction)")
             else:
                 reasoning.append("  Using weighted_average to preserve both signals (SLERP upgrade disabled by profile)")
             density = 0.5
@@ -3392,7 +3395,7 @@ class LoRAOptimizer(_LoRAMergeBase):
                     lines.append(f"  slerp (low conflict):            {n:>4} prefixes ({n/total_pf:.0%})")
                 if strategy_counts.get("weighted_average", 0) > 0:
                     n = strategy_counts["weighted_average"]
-                    lines.append(f"  weighted_average (low conflict):  {n:>4} prefixes ({n/total_pf:.0%})")
+                    lines.append(f"  weighted_average (orthogonal):    {n:>4} prefixes ({n/total_pf:.0%})")
                 if strategy_counts.get("consensus", 0) > 0:
                     n = strategy_counts["consensus"]
                     lines.append(f"  consensus (high similarity):     {n:>4} prefixes ({n/total_pf:.0%})")
@@ -3935,10 +3938,16 @@ class LoRAOptimizer(_LoRAMergeBase):
                         arch_preset=arch_preset,
                         precomputed_density=pf.get("precomputed_density"),
                     )
-                    # Upgrade weighted_average → slerp for 2+ LoRAs
-                    # SLERP preserves magnitude better (no cancellation from opposing vectors)
+                    # Upgrade weighted_average → slerp for 2+ non-orthogonal LoRAs.
+                    # SLERP preserves magnitude better (no cancellation from opposing vectors).
+                    # Skip for orthogonal LoRAs: SLERP's norm correction targets the arithmetic
+                    # mean of input norms, which is ~1.6x higher than weighted_average's result
+                    # for 3 orthogonal vectors.  That extra energy causes a "burned" look.
+                    # weighted_average divides by N, naturally reducing per-LoRA influence.
+                    pf_cos = abs(pf.get("avg_cos_sim", 0.0))
                     if (pf_mode == "weighted_average" and pf["n_loras"] >= 2
-                            and behavior_profile == "v1.2"):
+                            and behavior_profile == "v1.2"
+                            and pf_cos >= arch_preset["orthogonal_cos_sim_max"]):
                         pf_mode = "slerp"
 
             # Apply merge strategy override from Conflict Editor (takes priority over auto-selection)
