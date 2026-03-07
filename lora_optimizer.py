@@ -2697,7 +2697,7 @@ class LoRAOptimizer(_LoRAMergeBase):
                                           dare_dampening,
                                           merge_strategy_override, merge_quality,
                                           behavior_profile, architecture_preset)
-        cache_key = f"{base_key}|ss={settings_source}"
+        cache_key = f"{base_key}|mid={id(model)}|ss={settings_source}"
         if settings_source == "from_autotuner" and tuner_data is not None:
             return f"{cache_key}|at={id(tuner_data)}"
         return cache_key
@@ -3637,6 +3637,8 @@ class LoRAOptimizer(_LoRAMergeBase):
                                             dare_dampening,
                                             merge_strategy_override, merge_quality,
                                             behavior_profile, architecture_preset)
+        # Include model identity so switching base models invalidates the cache
+        cache_key = f"{cache_key}|mid={id(model)}"
         if cache_patches == "enabled" and cache_key in self._merge_cache:
             model_patches, clip_patches, report, clip_strength_out, lora_data = self._merge_cache[cache_key]
             new_model = model
@@ -4714,7 +4716,7 @@ class LoRAAutoTuner(LoRAOptimizer):
             f"{lora_hash}|os={output_strength}|csm={clip_strength_multiplier}"
             f"|top_n={top_n}|nk={normalize_keys}|ss={scoring_svd}"
             f"|ap={architecture_preset}|vb={vram_budget}"
-            f"|spd={scoring_speed}".encode()
+            f"|spd={scoring_speed}|mid={id(model)}".encode()
         ).hexdigest()[:16]
         if cache_patches == "enabled" and hasattr(self, '_autotuner_cache') and at_cache_key in self._autotuner_cache:
             cached_result, cached_mode = self._autotuner_cache[at_cache_key]
@@ -5300,7 +5302,7 @@ class LoRAAutoTuner(LoRAOptimizer):
                    cache_patches="enabled",
                    diff_cache_mode="disabled", diff_cache_ram_pct=0.5,
                    vram_budget=0.0, scoring_speed="full", output_mode="merge"):
-        return (id(lora_stack), output_strength, clip_strength_multiplier, top_n,
+        return (id(model), id(lora_stack), output_strength, clip_strength_multiplier, top_n,
                 normalize_keys, scoring_svd, scoring_device, architecture_preset,
                 vram_budget, record_dataset, scoring_speed, output_mode)
 
@@ -5434,7 +5436,7 @@ class LoRAMergeSelector(LoRAOptimizer):
     def IS_CHANGED(cls, model, lora_stack, tuner_data, selection,
                    output_strength, clip=None, clip_strength_multiplier=1.0,
                    vram_budget=0.0):
-        return (id(tuner_data), selection, output_strength, clip_strength_multiplier)
+        return (id(model), id(tuner_data), selection, output_strength, clip_strength_multiplier)
 
 
 class WanVideoLoRAOptimizer(LoRAOptimizer):
