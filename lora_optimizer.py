@@ -1378,7 +1378,7 @@ class _LoRAMergeBase:
         size, ComfyUI's eviction logic sees the true memory footprint.
         """
         patch_bytes = _LoRAMergeBase._estimate_patch_memory(patches_dict)
-        if patch_bytes > 0:
+        if patch_bytes > 0 and hasattr(patcher, 'model_size'):
             patcher.size = patcher.model_size() + patch_bytes
             logging.debug(f"[LoRA Optimizer] Updated model size: +{patch_bytes / (1024**2):.0f}MB patches")
 
