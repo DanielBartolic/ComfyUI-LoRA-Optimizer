@@ -4561,7 +4561,7 @@ class LoRAAutoTuner(LoRAOptimizer):
                     "tooltip": "Fraction of free VRAM to use for storing merged patches. 0 = all CPU (default), 1.0 = use all free VRAM. Reduces RAM usage on GPU systems."
                 }),
                 "scoring_speed": (["full", "fast", "turbo", "turbo+"], {
-                    "default": "full",
+                    "default": "turbo",
                     "tooltip": "Controls how many prefixes Phase 2 scores per candidate. "
                                "All candidates are scored on the same subset so ranking stays fair.\n\n"
                                "• full — Score every prefix. Best accuracy, slowest. Use when merging very different LoRAs (e.g. style + character + concept) where block behavior varies a lot.\n"
