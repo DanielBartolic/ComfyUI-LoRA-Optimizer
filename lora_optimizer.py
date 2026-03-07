@@ -4599,7 +4599,7 @@ class LoRAOptimizerSimple(LoRAOptimizer):
         cache_patches="enabled",
         compress_patches="non_ties",
         svd_device="gpu",
-        normalize_keys="disabled",
+        normalize_keys="enabled",
         sparsification="disabled",
         sparsification_density=0.7,
         dare_dampening=0.0,
