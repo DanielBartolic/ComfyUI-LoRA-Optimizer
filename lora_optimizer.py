@@ -3486,6 +3486,8 @@ class LoRAOptimizer(_LoRAMergeBase):
             lines.append(f"  Suggested max output_strength: {sms:.2f}")
             if sms >= 3.0:
                 lines.append(f"    (capped at 3.0 — actual headroom may be higher)")
+            elif sms <= 1.0:
+                lines.append(f"    (energy preserved — no compensation needed)")
 
         lines.append("")
         lines.append("=" * 50)
@@ -4390,8 +4392,7 @@ class LoRAOptimizer(_LoRAMergeBase):
         suggested_max_strength = None
         if total_merged_energy > 0 and total_input_energy > 0:
             norm_ratio = total_merged_energy / total_input_energy
-            if norm_ratio < 1.0:
-                suggested_max_strength = min(1.0 / norm_ratio, arch_preset["suggested_max_strength_cap"])
+            suggested_max_strength = min(1.0 / norm_ratio, arch_preset["suggested_max_strength_cap"])
 
         # Free analysis data no longer needed (skip when AutoTuner owns the data)
         if _analysis_cache is None:
