@@ -2345,11 +2345,20 @@ def _score_config_heuristic(config, avg_conflict_ratio, avg_cos_sim,
             score += 0.10
 
     # --- Quality fit (0-0.15) ---
+    # Enhanced/maximum resolve conflicts via orthogonalization, column-wise
+    # resolution, TALL masks, and SVD alignment.  When LoRAs are orthogonal
+    # there are no real conflicts — the extra processing treats noise as
+    # signal and can smooth away valid independent contributions.
     if quality == "maximum":
-        conflict_benefit = min(effective_conflict / 0.3, 1.0) * 0.10
-        score += 0.05 + conflict_benefit
+        if is_orthogonal:
+            score += min(effective_conflict / 0.3, 1.0) * 0.10
+        else:
+            score += 0.05 + min(effective_conflict / 0.3, 1.0) * 0.10
     elif quality == "enhanced":
-        score += 0.08 + min(effective_conflict / 0.3, 1.0) * 0.07
+        if is_orthogonal:
+            score += min(effective_conflict / 0.3, 1.0) * 0.10
+        else:
+            score += 0.08 + min(effective_conflict / 0.3, 1.0) * 0.07
     else:
         if effective_conflict < 0.10:
             score += 0.10
