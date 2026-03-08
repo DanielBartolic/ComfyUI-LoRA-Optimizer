@@ -1857,7 +1857,7 @@ class _LoRAMergeBase:
     def _merge_diffs(self, diffs_with_weights, mode, density=0.5, majority_sign_method="frequency",
                      compute_device=None, sparsification="disabled",
                      sparsification_density=0.7, sparsification_generator=None,
-                     merge_quality="standard", dare_dampening=0.0,
+                     merge_refinement="none", dare_dampening=0.0,
                      keep_on_gpu=False):
         """
         Merges a list of diffs with their weights.
@@ -1918,19 +1918,19 @@ class _LoRAMergeBase:
                                        **kwargs)
                     diffs_with_weights[idx] = (diff.to(dtype), weight)
 
-        # Enhanced/maximum merge quality pipeline (non-TIES modes)
+        # Refine/full merge refinement pipeline (non-TIES modes)
         # TIES has its own enhancement path below (after trim)
         # Order matters: TALL-masks must run BEFORE orthogonalization.
         # Orthogonalized diffs have uncorrelated element-wise distributions,
         # which causes TALL-masks to classify every position as "selfish"
         # (agreement=1 everywhere), zeroing out all consensus diffs.
         selfish_additions = None
-        if merge_quality != "standard" and len(diffs_with_weights) >= 2 and mode != "ties":
+        if merge_refinement != "none" and len(diffs_with_weights) >= 2 and mode != "ties":
             diffs_with_weights, selfish_additions = self._tall_masks(diffs_with_weights)
             first = diffs_with_weights[0][0]
             if first.dim() >= 2:
                 diffs_with_weights = self._do_orthogonalize(diffs_with_weights)
-            if merge_quality == "maximum":
+            if merge_refinement == "full":
                 first = diffs_with_weights[0][0]
                 if first.dim() >= 2 and min(first.shape) >= 2:
                     diffs_with_weights = self._knots_align(
@@ -2181,17 +2181,17 @@ class _LoRAMergeBase:
                         trimmed.append(self._ties_trim(d_f, density))
                     abs_weights.append(abs(w))
 
-            # Enhanced/maximum merge quality pipeline for TIES
+            # Refine/full merge refinement pipeline for TIES
             # TALL-masks before orthogonalization (see non-TIES comment above)
             ties_selfish = None
-            if merge_quality != "standard" and len(trimmed) >= 2:
+            if merge_refinement != "none" and len(trimmed) >= 2:
                 # Re-pair trimmed diffs with abs_weights for enhancement pipeline
                 trimmed_pairs = list(zip(trimmed, abs_weights))
                 trimmed_pairs, ties_selfish = self._tall_masks(trimmed_pairs)
                 first = trimmed_pairs[0][0]
                 if first.dim() >= 2:
                     trimmed_pairs = self._do_orthogonalize(trimmed_pairs)
-                if merge_quality == "maximum":
+                if merge_refinement == "full":
                     first = trimmed_pairs[0][0]
                     if first.dim() >= 2 and min(first.shape) >= 2:
                         trimmed_pairs = self._knots_align(
@@ -2201,13 +2201,13 @@ class _LoRAMergeBase:
                 del trimmed_pairs
 
             # Step 2: Elect majority sign
-            if merge_quality != "standard":
+            if merge_refinement != "none":
                 majority_sign = self._columnwise_elect_sign(trimmed, majority_sign_method)
             else:
                 majority_sign = self._ties_elect_sign(trimmed, majority_sign_method)
 
             # Step 3: Disjoint merge
-            if merge_quality != "standard":
+            if merge_refinement != "none":
                 result = self._columnwise_disjoint_merge(trimmed, abs_weights, majority_sign)
             else:
                 result = self._ties_disjoint_merge(trimmed, abs_weights, majority_sign)
@@ -2474,7 +2474,7 @@ def _generate_param_grid():
     sparsifications = ["disabled", "dare", "della", "dare_conflict", "della_conflict"]
     densities = [0.5, 0.7, 0.9]
     dampenings = [0.0, 0.3, 0.6]
-    qualities = ["standard", "enhanced", "maximum"]
+    qualities = ["none", "refine", "full"]
     auto_strengths = ["enabled", "disabled"]
 
     for spars in sparsifications:
@@ -2491,7 +2491,7 @@ def _generate_param_grid():
                             "sparsification": spars,
                             "sparsification_density": density,
                             "dare_dampening": dampening,
-                            "merge_quality": quality,
+                            "merge_refinement": quality,
                             "auto_strength": auto_str,
                             "optimization_mode": "per_prefix",
                         })
@@ -2502,7 +2502,7 @@ def _generate_param_grid():
                                 "sparsification": spars,
                                 "sparsification_density": density,
                                 "dare_dampening": dampening,
-                                "merge_quality": quality,
+                                "merge_refinement": quality,
                                 "auto_strength": auto_str,
                                 "optimization_mode": "global",
                             })
@@ -2521,7 +2521,7 @@ def _score_config_heuristic(config, avg_conflict_ratio, avg_cos_sim,
     mode = config["merge_mode"]
     spars = config["sparsification"]
     density = config["sparsification_density"]
-    quality = config["merge_quality"]
+    quality = config["merge_refinement"]
     auto_str = config["auto_strength"]
     opt_mode = config["optimization_mode"]
 
@@ -2620,12 +2620,12 @@ def _score_config_heuristic(config, avg_conflict_ratio, avg_cos_sim,
     # resolution, TALL masks, and SVD alignment.  When LoRAs are orthogonal
     # there are no real conflicts — the extra processing treats noise as
     # signal and can smooth away valid independent contributions.
-    if quality == "maximum":
+    if quality == "full":
         if is_orthogonal:
             score += min(effective_conflict / 0.3, 1.0) * 0.10
         else:
             score += 0.05 + min(effective_conflict / 0.3, 1.0) * 0.10
-    elif quality == "enhanced":
+    elif quality == "refine":
         if is_orthogonal:
             score += min(effective_conflict / 0.3, 1.0) * 0.10
         else:
@@ -2884,17 +2884,21 @@ class LoRAOptimizer(_LoRAMergeBase):
                     "default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05,
                     "tooltip": "Fraction of free VRAM to use for storing merged patches. 0 = all CPU (default), 1.0 = use all free VRAM. Reduces RAM usage on GPU systems."
                 }),
-                "optimization_mode": (["per_prefix", "global", "weighted_sum_only"], {
+                "optimization_mode": (["per_prefix", "global", "additive"], {
                     "default": "per_prefix",
-                    "tooltip": "How the optimizer decides to combine LoRAs. 'per_prefix' (recommended): automatically picks the best method for each layer. 'global': uses one method everywhere. 'weighted_sum_only': simple addition, no TIES trimming — use this if your stack includes edit, distillation, or DPO LoRAs whose weights must be preserved exactly."
+                    "tooltip": "How the optimizer decides to combine LoRAs. 'per_prefix' (recommended): automatically picks the best method for each layer. 'global': uses one method everywhere. 'additive': simple weighted addition with no conflict resolution — preserves all weights exactly. Use for edit, distillation, or DPO LoRAs. (Previously: 'additive' was called 'weighted_sum_only'.)"
                 }),
                 "cache_patches": (["enabled", "disabled"], {
                     "default": "enabled",
                     "tooltip": "Keep the merge result in memory so re-running the workflow is instant (no re-merge needed). Disable to save RAM — recommended for large video models like Wan or LTX."
                 }),
-                "compress_patches": (["non_ties", "all", "disabled"], {
-                    "default": "non_ties",
-                    "tooltip": "Shrink the merged result to use less memory. 'non_ties' (recommended): compresses most layers with no quality loss. 'all': compresses everything, slightly lossy but saves the most memory. 'disabled': no compression, uses more RAM. Enable for large models."
+                "patch_compression": (["smart", "aggressive", "disabled"], {
+                    "default": "smart",
+                    "tooltip": "Shrink the merged result to use less memory. "
+                               "'smart' (recommended): compresses layers where it's lossless, skips layers that already went through rank reduction. "
+                               "'aggressive': compresses everything including rank-reduced layers — saves the most memory but slightly lossy. "
+                               "'disabled': no compression, uses more RAM. "
+                               "(Previously: this setting was called 'compress_patches' with values non_ties/all/disabled.)"
                 }),
                 "svd_device": (["gpu", "cpu"], {
                     "default": "gpu",
@@ -2924,20 +2928,25 @@ class LoRAOptimizer(_LoRAMergeBase):
                                "At higher values: dampened rescaling that reduces noise amplification at low density values. "
                                "Only affects DARE/DARE-conflict modes. Based on DAREx (ICLR 2025)."
                 }),
-                "merge_quality": (["standard", "enhanced", "maximum"], {
-                    "default": "standard",
-                    "tooltip": "Merge quality level. standard: element-wise conflict resolution. "
-                               "enhanced: direction orthogonalization + column-wise conflict "
-                               "resolution + selfish weight protection (minimal extra compute, no extra VRAM). "
-                               "maximum: adds SVD alignment before merge (best quality, "
-                               "uses more VRAM for SVD decomposition)."
+                "merge_refinement": (["none", "refine", "full"], {
+                    "default": "none",
+                    "tooltip": "Optional preprocessing steps applied to weight diffs before merging. "
+                               "none: merge as-is, no extra processing. "
+                               "refine: adds direction orthogonalization + selfish weight protection "
+                               "(TALL-masks) to reduce interference between LoRAs (minimal extra compute). "
+                               "full: adds SVD alignment (KnOTS) on top of refine for maximum "
+                               "interference reduction (uses more VRAM for SVD decomposition). "
+                               "Higher levels help most when LoRAs have high conflict; "
+                               "for low-conflict or orthogonal LoRAs, 'none' is usually fine. "
+                               "(Previously: this setting was called 'merge_quality' with values standard/enhanced/maximum.)"
                 }),
-                "behavior_profile": (["v1.2", "no_slerp", "classic"], {
-                    "default": "v1.2",
-                    "tooltip": "Controls auto-selection logic. "
-                               "'v1.2': full v1.2 behavior (consensus, orthogonal detection, SLERP upgrade). "
-                               "'no_slerp': v1.2 detection without SLERP upgrade (weighted_average stays as-is). "
-                               "'classic': pre-1.2 behavior (TIES vs weighted_average only, no SLERP)."
+                "strategy_set": (["full", "no_slerp", "basic"], {
+                    "default": "full",
+                    "tooltip": "Which merge strategies the auto-selector can choose from. "
+                               "'full': all strategies available (consensus, SLERP, orthogonal detection). "
+                               "'no_slerp': same detection logic but SLERP is excluded (weighted_average stays as-is). "
+                               "'basic': only TIES vs weighted_average, no advanced strategy selection. "
+                               "(Previously: this setting was called 'behavior_profile' with values v1.2/no_slerp/classic.)"
                 }),
                 "architecture_preset": (["auto", "sd_unet", "dit", "llm"], {
                     "default": "auto",
@@ -2967,7 +2976,7 @@ class LoRAOptimizer(_LoRAMergeBase):
     DESCRIPTION = "Auto-analyzes LoRA stack and selects optimal merge strategy per weight group. Outputs merged model + analysis report. Best for style/character LoRAs — apply edit, distillation (LCM/Turbo/Hyper), or DPO LoRAs via a standard Load LoRA node instead."
 
     @staticmethod
-    def _compute_cache_key(lora_stack, output_strength, clip_strength_multiplier, auto_strength, optimization_mode="per_prefix", compress_patches="non_ties", svd_device="gpu", normalize_keys="disabled", sparsification="disabled", sparsification_density=0.7, dare_dampening=0.0, merge_strategy_override="", merge_quality="standard", behavior_profile="v1.2", architecture_preset="auto", auto_strength_floor=-1.0):
+    def _compute_cache_key(lora_stack, output_strength, clip_strength_multiplier, auto_strength, optimization_mode="per_prefix", patch_compression="smart", svd_device="gpu", normalize_keys="disabled", sparsification="disabled", sparsification_density=0.7, dare_dampening=0.0, merge_strategy_override="", merge_refinement="none", strategy_set="full", architecture_preset="auto", auto_strength_floor=-1.0):
         """
         Build a deterministic SHA-256 hash (16 hex chars) from the stack
         configuration. Used by IS_CHANGED to let ComfyUI skip re-execution
@@ -2990,7 +2999,7 @@ class LoRAOptimizer(_LoRAMergeBase):
                     entries.append((str(item.get("name", "")), float(item.get("strength", 0)), cm, kf))
             entries.sort()
             h.update(json.dumps(entries).encode())
-        h.update(f"|os={output_strength}|csm={clip_strength_multiplier}|as={auto_strength}|om={optimization_mode}|cp={compress_patches}|sd={svd_device}|nk={normalize_keys}|sp={sparsification}|spd={sparsification_density}|dd={dare_dampening}|mso={merge_strategy_override}|mq={merge_quality}|bp={behavior_profile}|ap={architecture_preset}|asf={auto_strength_floor}".encode())
+        h.update(f"|os={output_strength}|csm={clip_strength_multiplier}|as={auto_strength}|om={optimization_mode}|cp={patch_compression}|sd={svd_device}|nk={normalize_keys}|sp={sparsification}|spd={sparsification_density}|dd={dare_dampening}|mso={merge_strategy_override}|mq={merge_refinement}|bp={strategy_set}|ap={architecture_preset}|asf={auto_strength_floor}".encode())
         return h.hexdigest()[:16]
 
     @classmethod
@@ -2999,21 +3008,21 @@ class LoRAOptimizer(_LoRAMergeBase):
                    auto_strength_floor=-1.0,
                    free_vram_between_passes="disabled", vram_budget=0.0,
                    optimization_mode="per_prefix",
-                   cache_patches="enabled", compress_patches="non_ties",
+                   cache_patches="enabled", patch_compression="smart",
                    svd_device="gpu", normalize_keys="disabled",
                    sparsification="disabled", sparsification_density=0.7,
                    dare_dampening=0.0,
-                   merge_strategy_override="", merge_quality="standard",
-                   behavior_profile="v1.2", architecture_preset="auto",
+                   merge_strategy_override="", merge_refinement="none",
+                   strategy_set="full", architecture_preset="auto",
                    tuner_data=None, settings_source="manual"):
         base_key = cls._compute_cache_key(lora_stack, output_strength,
                                           clip_strength_multiplier, auto_strength,
-                                          optimization_mode, compress_patches,
+                                          optimization_mode, patch_compression,
                                           svd_device, normalize_keys,
                                           sparsification, sparsification_density,
                                           dare_dampening,
-                                          merge_strategy_override, merge_quality,
-                                          behavior_profile, architecture_preset,
+                                          merge_strategy_override, merge_refinement,
+                                          strategy_set, architecture_preset,
                                           auto_strength_floor)
         cache_key = f"{base_key}|mid={id(model)}|ss={settings_source}"
         if settings_source == "from_autotuner" and tuner_data is not None:
@@ -3509,7 +3518,7 @@ class LoRAOptimizer(_LoRAMergeBase):
             return meaningful[0]
         return prefix[:30]
 
-    def _auto_select_params(self, avg_conflict_ratio, magnitude_ratio, all_key_diffs=None, magnitude_samples=None, avg_cos_sim=0.0, behavior_profile="v1.2", arch_preset=None, precomputed_density=None):
+    def _auto_select_params(self, avg_conflict_ratio, magnitude_ratio, all_key_diffs=None, magnitude_samples=None, avg_cos_sim=0.0, strategy_set="full", arch_preset=None, precomputed_density=None):
         """
         Decision logic for auto-selecting merge parameters.
         Returns (mode, density, sign_method, reasoning_lines).
@@ -3522,7 +3531,7 @@ class LoRAOptimizer(_LoRAMergeBase):
         reasoning = []
 
         # High similarity + low conflict → consensus mode (Fisher-proxy + magnitude calibration)
-        if (behavior_profile == "v1.2"
+        if (strategy_set == "full"
                 and avg_cos_sim > arch_preset["consensus_cos_sim_min"]
                 and avg_conflict_ratio < arch_preset["consensus_conflict_max"]):
             mode = "consensus"
@@ -3538,13 +3547,13 @@ class LoRAOptimizer(_LoRAMergeBase):
         # destroys both signals. Use weighted_average as the global mode,
         # upgraded to SLERP per-prefix to preserve magnitude (important for
         # video LoRAs where motion energy matters).
-        if (behavior_profile in ("v1.2", "no_slerp")
+        if (strategy_set in ("full", "no_slerp")
                 and abs(avg_cos_sim) < arch_preset["orthogonal_cos_sim_max"]
                 and avg_conflict_ratio < arch_preset["orthogonal_conflict_max"]):
             mode = "weighted_average"
             reasoning.append(f"Cosine similarity {avg_cos_sim:.2f} near zero (orthogonal LoRAs) — "
                              f"sign conflict {avg_conflict_ratio:.1%} is base-rate noise, not real conflict")
-            if behavior_profile == "v1.2":
+            if strategy_set == "full":
                 reasoning.append("  Using weighted_average (upgraded to SLERP per-prefix to preserve magnitude)")
             else:
                 reasoning.append("  Using weighted_average to preserve both signals (SLERP upgrade disabled by profile)")
@@ -3597,9 +3606,9 @@ class LoRAOptimizer(_LoRAMergeBase):
                       prefix_decisions=None, detected_arch=None, normalize_keys="disabled",
                       sparsification="disabled", sparsification_density=0.7,
                       dare_dampening=0.0,
-                      merge_quality="standard",
+                      merge_refinement="none",
                       compatibility_warnings=None,
-                      behavior_profile="v1.2",
+                      strategy_set="full",
                       architecture_preset=None,
                       is_full_rank=False):
         """Format analysis as a multi-line report string."""
@@ -3706,8 +3715,8 @@ class LoRAOptimizer(_LoRAMergeBase):
         # Auto-Selected Parameters
         lines.append("")
         lines.append("--- Auto-Selected Parameters ---")
-        if optimization_mode == "weighted_sum_only":
-            lines.append(f"  Merge mode: weighted_sum (forced by weighted_sum_only)")
+        if optimization_mode == "additive":
+            lines.append(f"  Merge mode: weighted_sum (forced by additive)")
             lines.append(f"  Auto-detected mode: {mode} (overridden)")
         else:
             lines.append(f"  Merge mode: {mode}")
@@ -3729,26 +3738,26 @@ class LoRAOptimizer(_LoRAMergeBase):
                 lines.append(f"  DAREx dampening: {dare_dampening:.2f} (rescale factor: 1/{q:.2f} = {1.0/q:.2f}x vs standard 1/{sparsification_density:.2f} = {1.0/sparsification_density:.2f}x)")
             if optimization_mode == "per_prefix":
                 lines.append(f"  For TIES prefixes: replaces trim step; others: preprocessing")
-            elif optimization_mode == "weighted_sum_only":
+            elif optimization_mode == "additive":
                 lines.append(f"  Applied as preprocessing before weighted_sum")
             elif mode == "ties":
                 lines.append(f"  Note: {display_name} replaces TIES trim step")
             else:
                 lines.append(f"  Applied as preprocessing before {mode}")
 
-        if merge_quality != "standard":
+        if merge_refinement != "none":
             quality_desc = {
-                "enhanced": "Enhanced (DO-orthogonalize + column-wise + TALL-masks)",
-                "maximum": "Maximum (DO-orthogonalize + KnOTS SVD alignment + column-wise + TALL-masks)",
+                "refine": "Refine (orthogonalize + TALL-masks)",
+                "full": "Full (orthogonalize + KnOTS SVD alignment + TALL-masks)",
             }
-            lines.append(f"  Merge quality: {quality_desc.get(merge_quality, merge_quality)}")
+            lines.append(f"  Merge refinement: {quality_desc.get(merge_refinement, merge_refinement)}")
 
-        if behavior_profile != "v1.2":
+        if strategy_set != "full":
             profile_desc = {
-                "no_slerp": "no_slerp (v1.2 detection, no SLERP upgrade)",
-                "classic": "classic (pre-1.2 behavior, TIES vs weighted_average only)",
+                "no_slerp": "no_slerp (full detection, no SLERP upgrade)",
+                "basic": "basic (TIES vs weighted_average only)",
             }
-            lines.append(f"  Behavior profile: {profile_desc.get(behavior_profile, behavior_profile)}")
+            lines.append(f"  Strategy set: {profile_desc.get(strategy_set, strategy_set)}")
 
         # Per-Prefix Strategy breakdown (only in per_prefix mode)
         if optimization_mode == "per_prefix" and strategy_counts:
@@ -3865,11 +3874,11 @@ class LoRAOptimizer(_LoRAMergeBase):
                      auto_strength_floor=-1.0,
                      free_vram_between_passes="disabled", vram_budget=0.0,
                      optimization_mode="per_prefix", cache_patches="enabled",
-                     compress_patches="non_ties", svd_device="gpu",
+                     patch_compression="smart", svd_device="gpu",
                      normalize_keys="enabled", sparsification="disabled",
                      sparsification_density=0.7, dare_dampening=0.0,
-                     merge_strategy_override="", merge_quality="standard",
-                     behavior_profile="v1.2", architecture_preset="auto",
+                     merge_strategy_override="", merge_refinement="none",
+                     strategy_set="full", architecture_preset="auto",
                      tuner_data=None, settings_source="manual"):
         """
         ComfyUI entry point. Routes between passthrough and merge modes:
@@ -3893,7 +3902,7 @@ class LoRAOptimizer(_LoRAMergeBase):
                     f"[AutoTuner Bridge] Passthrough — model merged by AutoTuner (rank #1, score: {score:.3f}):",
                     f"  optimization_mode: {config['optimization_mode']}",
                     f"  merge mode: {mode_display}",
-                    f"  merge_quality: {config['merge_quality']}",
+                    f"  merge_refinement: {config['merge_refinement']}",
                 ]
                 if config["sparsification"] != "disabled":
                     report_lines.append(
@@ -3923,21 +3932,21 @@ class LoRAOptimizer(_LoRAMergeBase):
             vram_budget=vram_budget,
             optimization_mode=optimization_mode,
             cache_patches=cache_patches,
-            compress_patches=compress_patches,
+            patch_compression=patch_compression,
             svd_device=svd_device,
             normalize_keys=normalize_keys,
             sparsification=sparsification,
             sparsification_density=sparsification_density,
             dare_dampening=dare_dampening,
             merge_strategy_override=merge_strategy_override,
-            merge_quality=merge_quality,
-            behavior_profile=behavior_profile,
+            merge_refinement=merge_refinement,
+            strategy_set=strategy_set,
             architecture_preset=architecture_preset,
         )
 
         return result
 
-    def optimize_merge(self, model, lora_stack, output_strength, clip=None, clip_strength_multiplier=1.0, auto_strength="disabled", auto_strength_floor=-1.0, free_vram_between_passes="disabled", vram_budget=0.0, optimization_mode="per_prefix", cache_patches="enabled", compress_patches="non_ties", svd_device="gpu", normalize_keys="disabled", sparsification="disabled", sparsification_density=0.7, dare_dampening=0.0, merge_strategy_override="", merge_quality="standard", behavior_profile="v1.2", architecture_preset="auto", _analysis_cache=None, _diff_cache=None, _skip_report=False):
+    def optimize_merge(self, model, lora_stack, output_strength, clip=None, clip_strength_multiplier=1.0, auto_strength="disabled", auto_strength_floor=-1.0, free_vram_between_passes="disabled", vram_budget=0.0, optimization_mode="per_prefix", cache_patches="enabled", patch_compression="smart", svd_device="gpu", normalize_keys="disabled", sparsification="disabled", sparsification_density=0.7, dare_dampening=0.0, merge_strategy_override="", merge_refinement="none", strategy_set="full", architecture_preset="auto", _analysis_cache=None, _diff_cache=None, _skip_report=False):
         """
         Main entry point. Two-pass streaming architecture:
         Pass 1: Compute diffs per-prefix, sample conflicts + magnitudes, discard diffs
@@ -3994,12 +4003,12 @@ class LoRAOptimizer(_LoRAMergeBase):
         # triggered by downstream seed changes or similar non-LoRA changes)
         cache_key = self._compute_cache_key(lora_stack, output_strength,
                                             clip_strength_multiplier, auto_strength,
-                                            optimization_mode, compress_patches,
+                                            optimization_mode, patch_compression,
                                             svd_device, normalize_keys,
                                             sparsification, sparsification_density,
                                             dare_dampening,
-                                            merge_strategy_override, merge_quality,
-                                            behavior_profile, architecture_preset,
+                                            merge_strategy_override, merge_refinement,
+                                            strategy_set, architecture_preset,
                                             auto_strength_floor)
         # Include model identity so switching base models invalidates the cache
         cache_key = f"{cache_key}|mid={id(model)}"
@@ -4123,6 +4132,7 @@ class LoRAOptimizer(_LoRAMergeBase):
         fr_rank_threshold = fr_preset.get("rank_threshold", 256)
         global_avg_rank = (sum(s["avg_rank"] for s in lora_stats) / len(lora_stats)) if lora_stats else 0
         is_full_rank = global_avg_rank >= fr_rank_threshold
+        logging.info(f"[LoRA Optimizer] Global avg rank: {global_avg_rank:.0f} (full-rank threshold: {fr_rank_threshold})")
         if is_full_rank:
             logging.info(f"[LoRA Optimizer] Full-rank LoRAs detected (avg rank {global_avg_rank:.0f} >= {fr_rank_threshold})")
             if fr_preset.get("disable_slerp_upgrade", False):
@@ -4194,14 +4204,14 @@ class LoRAOptimizer(_LoRAMergeBase):
                               / len(pairwise_conflicts)) if pairwise_conflicts else 0.0
         mode, density, sign_method, reasoning = self._auto_select_params(
             avg_conflict_ratio, magnitude_ratio, magnitude_samples=all_magnitude_samples,
-            avg_cos_sim=global_avg_cos_sim, behavior_profile=behavior_profile,
+            avg_cos_sim=global_avg_cos_sim, strategy_set=strategy_set,
             arch_preset=arch_preset
         )
         del all_magnitude_samples
 
         # Apply merge strategy override from Conflict Editor
-        # Skip when user explicitly chose weighted_sum_only (protects DPO/edit LoRAs)
-        if merge_strategy_override and optimization_mode != "weighted_sum_only":
+        # Skip when user explicitly chose additive (protects DPO/edit LoRAs)
+        if merge_strategy_override and optimization_mode != "additive":
             if merge_strategy_override in ("ties", "weighted_average", "weighted_sum", "consensus", "slerp"):
                 mode = merge_strategy_override
                 reasoning.append(f"Merge mode overridden to '{mode}' by Conflict Editor")
@@ -4250,12 +4260,12 @@ class LoRAOptimizer(_LoRAMergeBase):
         if free_vram_between_passes == "enabled" and use_gpu:
             torch.cuda.empty_cache()
 
-        # Resolve compress_patches rank (sum of input LoRA ranks)
+        # Resolve patch_compression rank (sum of input LoRA ranks)
         sum_rank = sum(int(stat["avg_rank"]) for stat in lora_stats if stat["avg_rank"] > 0)
         compress_rank = 0  # 0 = disabled
-        if compress_patches in ("non_ties", "all"):
+        if patch_compression in ("smart", "aggressive"):
             compress_rank = max(sum_rank, 64)  # floor at 64
-            logging.info(f"[LoRA Optimizer] Patch compression: {compress_patches} (rank {compress_rank} from sum of input LoRA ranks)")
+            logging.info(f"[LoRA Optimizer] Patch compression: {patch_compression} (rank {compress_rank} from sum of input LoRA ranks)")
 
         # Resolve SVD device for compression
         resolved_svd_device = None
@@ -4321,7 +4331,7 @@ class LoRAOptimizer(_LoRAMergeBase):
             pf_sign = sign_method
             pf_orthogonal = False
             pf_opposing = False
-            if optimization_mode == "weighted_sum_only":
+            if optimization_mode == "additive":
                 pf_mode = "weighted_sum"
                 pf_n_loras = prefix_stats.get(lora_prefix, {}).get("n_loras", 0)
                 pf_conflict = prefix_stats.get(lora_prefix, {}).get("conflict_ratio", 0.0)
@@ -4338,7 +4348,7 @@ class LoRAOptimizer(_LoRAMergeBase):
                         pf["conflict_ratio"], pf["magnitude_ratio"],
                         magnitude_samples=pf.get("magnitude_samples"),
                         avg_cos_sim=pf.get("avg_cos_sim", 0.0),
-                        behavior_profile=behavior_profile,
+                        strategy_set=strategy_set,
                         arch_preset=arch_preset,
                         precomputed_density=pf.get("precomputed_density"),
                     )
@@ -4354,7 +4364,7 @@ class LoRAOptimizer(_LoRAMergeBase):
                     # information is spread across all dimensions, and SLERP's
                     # hypersphere interpolation loses signal from both LoRAs.
                     if (pf_mode == "weighted_average" and pf["n_loras"] >= 2
-                            and behavior_profile == "v1.2"
+                            and strategy_set == "full"
                             and not pf_opposing
                             and not (is_full_rank and fr_preset.get("disable_slerp_upgrade", False))):
                         pf_mode = "slerp"
@@ -4365,8 +4375,8 @@ class LoRAOptimizer(_LoRAMergeBase):
                         pf_mode = "weighted_sum"
 
             # Apply merge strategy override from Conflict Editor (takes priority over auto-selection)
-            # Skip when user explicitly chose weighted_sum_only (protects DPO/edit LoRAs)
-            if (merge_strategy_override and optimization_mode != "weighted_sum_only"
+            # Skip when user explicitly chose additive (protects DPO/edit LoRAs)
+            if (merge_strategy_override and optimization_mode != "additive"
                     and merge_strategy_override in ("ties", "weighted_average", "weighted_sum", "consensus", "slerp")):
                 pf_mode = merge_strategy_override
 
@@ -4498,7 +4508,7 @@ class LoRAOptimizer(_LoRAMergeBase):
                     # Sign voting for conflict-mode masking.
                     # Negative eff_strength flips the effective direction, so we
                     # negate the sign vote accordingly.
-                    if merge_quality != "standard" and diffs_list[0][0].dim() >= 2:
+                    if merge_refinement != "none" and diffs_list[0][0].dim() >= 2:
                         # Column-wise: each output neuron (row) votes as a unit
                         ref = diffs_list[0][0]
                         out_dim = ref.shape[0]
@@ -4556,9 +4566,9 @@ class LoRAOptimizer(_LoRAMergeBase):
             # Opposing LoRAs have a similar problem: the magnitude calibration
             # in enhanced quality doesn't account for the directional cancellation
             # that weighted_average provides.
-            pf_quality = merge_quality
+            pf_quality = merge_refinement
             if (pf_mode == "weighted_average" and pf_opposing):
-                pf_quality = "standard"
+                pf_quality = "none"
 
             merged_diff = self._merge_diffs(
                 diffs_list, pf_mode,
@@ -4567,7 +4577,7 @@ class LoRAOptimizer(_LoRAMergeBase):
                 sparsification=sparsification,
                 sparsification_density=sparsification_density,
                 sparsification_generator=sp_gen,
-                merge_quality=pf_quality,
+                merge_refinement=pf_quality,
                 dare_dampening=dare_dampening,
                 keep_on_gpu=should_keep,
             )
@@ -4578,7 +4588,7 @@ class LoRAOptimizer(_LoRAMergeBase):
             # Compress full-rank diff to low-rank via SVD if requested
             # non_ties: skip compression on TIES prefixes (lossy); all: compress everything
             should_compress = (compress_rank > 0 and
-                               (compress_patches == "all" or pf_mode != "ties"))
+                               (patch_compression == "aggressive" or pf_mode != "ties"))
             # Downcast from float32 to native weight dtype (e.g. fp16/bf16)
             # to halve memory — ComfyUI handles dtype conversion when applying
             if storage_dtype is not None and merged_diff.dtype != storage_dtype:
@@ -4790,9 +4800,9 @@ class LoRAOptimizer(_LoRAMergeBase):
             sparsification=sparsification,
             sparsification_density=sparsification_density,
             dare_dampening=dare_dampening,
-            merge_quality=merge_quality,
+            merge_refinement=merge_refinement,
             compatibility_warnings=compatibility_warnings,
-            behavior_profile=behavior_profile,
+            strategy_set=strategy_set,
             architecture_preset=preset_key,
             is_full_rank=is_full_rank,
         )
@@ -4872,7 +4882,7 @@ class LoRAOptimizerSimple(LoRAOptimizer):
     DESCRIPTION = (
         "Simplified LoRA Optimizer — merges a LoRA stack with good defaults. "
         "Accepts optional tuner_data to use AutoTuner results. "
-        "Use LoRA Optimizer (Advanced) for sparsification, merge quality, "
+        "Use LoRA Optimizer (Advanced) for sparsification, merge refinement, "
         "SVD device, and other fine-tuning options."
     )
 
@@ -4883,15 +4893,15 @@ class LoRAOptimizerSimple(LoRAOptimizer):
         vram_budget=0.0,
         optimization_mode="per_prefix",
         cache_patches="enabled",
-        compress_patches="non_ties",
+        patch_compression="smart",
         svd_device="gpu",
         normalize_keys="enabled",
         sparsification="disabled",
         sparsification_density=0.7,
         dare_dampening=0.0,
         merge_strategy_override="",
-        merge_quality="standard",
-        behavior_profile="v1.2",
+        merge_refinement="none",
+        strategy_set="full",
         architecture_preset="auto",
     )
 
@@ -5049,7 +5059,7 @@ class LoRAAutoTuner(LoRAOptimizer):
             merged_model, merged_clip, report, _, lora_data = super().optimize_merge(
                 model, lora_stack, output_strength,
                 clip=clip, clip_strength_multiplier=clip_strength_multiplier,
-                normalize_keys=normalize_keys, behavior_profile="v1.2",
+                normalize_keys=normalize_keys, strategy_set="full",
                 architecture_preset=architecture_preset, vram_budget=vram_budget,
             )
             return (merged_model, merged_clip,
@@ -5181,7 +5191,7 @@ class LoRAAutoTuner(LoRAOptimizer):
         for i in range(min(5, len(scored))):
             c = scored[i][1]
             logging.info(f"[LoRA AutoTuner]   #{i+1} heuristic={scored[i][0]:.3f}: "
-                         f"{c['merge_mode']}/{c['merge_quality']}"
+                         f"{c['merge_mode']}/{c['merge_refinement']}"
                          f"{' +' + c['sparsification'] if c['sparsification'] != 'disabled' else ''}"
                          f" auto_str={c['auto_strength']} {c['optimization_mode']}")
 
@@ -5246,7 +5256,7 @@ class LoRAAutoTuner(LoRAOptimizer):
 
         for rank_idx, (h_score, config) in enumerate(top_candidates):
             logging.info(f"[LoRA AutoTuner]   Candidate {rank_idx + 1}/{len(top_candidates)}: "
-                         f"{config['merge_mode']}, {config['merge_quality']}"
+                         f"{config['merge_mode']}, {config['merge_refinement']}"
                          f"{', ' + config['sparsification'] if config['sparsification'] != 'disabled' else ''}"
                          f" (heuristic={h_score:.3f})...")
             t_merge = time.time()
@@ -5265,15 +5275,15 @@ class LoRAAutoTuner(LoRAOptimizer):
                 sparsification=config["sparsification"],
                 sparsification_density=config["sparsification_density"],
                 dare_dampening=config["dare_dampening"],
-                merge_quality=config["merge_quality"],
+                merge_refinement=config["merge_refinement"],
                 merge_strategy_override=strategy_override,
                 free_vram_between_passes="disabled",
                 vram_budget=vram_budget,
                 cache_patches="disabled",
-                compress_patches="disabled",
+                patch_compression="disabled",
                 svd_device="gpu",
                 normalize_keys=normalize_keys,
-                behavior_profile="v1.2",
+                strategy_set="full",
                 architecture_preset=architecture_preset,
                 _analysis_cache=scoring_cache,
                 _diff_cache=_diff_cache,
@@ -5334,7 +5344,7 @@ class LoRAAutoTuner(LoRAOptimizer):
         # Final full merge when subsampling was used (skip if tuning_only)
         if use_subsampling and best_config is not None and output_mode != "tuning_only":
             logging.info(f"[LoRA AutoTuner] Final merge with winning config "
-                         f"({best_config['merge_mode']}, {best_config['merge_quality']})...")
+                         f"({best_config['merge_mode']}, {best_config['merge_refinement']})...")
             t_final = time.time()
             strategy_override = best_config["merge_mode"] if best_config["optimization_mode"] == "global" else ""
             best_model, best_clip, best_analysis_report, _, best_lora_data = super().optimize_merge(
@@ -5347,15 +5357,15 @@ class LoRAAutoTuner(LoRAOptimizer):
                 sparsification=best_config["sparsification"],
                 sparsification_density=best_config["sparsification_density"],
                 dare_dampening=best_config["dare_dampening"],
-                merge_quality=best_config["merge_quality"],
+                merge_refinement=best_config["merge_refinement"],
                 merge_strategy_override=strategy_override,
                 free_vram_between_passes="disabled",
                 vram_budget=vram_budget,
                 cache_patches="disabled",
-                compress_patches="disabled",
+                patch_compression="disabled",
                 svd_device="gpu",
                 normalize_keys=normalize_keys,
-                behavior_profile="v1.2",
+                strategy_set="full",
                 architecture_preset=architecture_preset,
                 _analysis_cache=_analysis_cache,
                 _diff_cache=_diff_cache,
@@ -5562,7 +5572,7 @@ class LoRAAutoTuner(LoRAOptimizer):
             lines.append(f"  #{r['rank']}{star}{marker}"
                          f"          Score: {r['score_measured']:.2f}")
             mode_display = "per-prefix (auto)" if c["optimization_mode"] == "per_prefix" else c["merge_mode"]
-            lines.append(f"    Mode: {mode_display} | Quality: {c['merge_quality']}")
+            lines.append(f"    Mode: {mode_display} | Refinement: {c['merge_refinement']}")
             if c["sparsification"] != "disabled":
                 spars_info = f"{c['sparsification']} (density={c['sparsification_density']}"
                 if c["dare_dampening"] > 0:
@@ -5678,7 +5688,7 @@ class LoRAMergeSelector(LoRAOptimizer):
         config = entry["config"]
 
         logging.info(f"[Merge Selector] Applying config #{selection}: "
-                     f"{config['merge_mode']}, {config['merge_quality']}")
+                     f"{config['merge_mode']}, {config['merge_refinement']}")
 
         # Run merge with selected config
         # In per_prefix mode, let the optimizer auto-select strategy per prefix.
@@ -5693,15 +5703,15 @@ class LoRAMergeSelector(LoRAOptimizer):
             sparsification=config["sparsification"],
             sparsification_density=config["sparsification_density"],
             dare_dampening=config["dare_dampening"],
-            merge_quality=config["merge_quality"],
+            merge_refinement=config["merge_refinement"],
             merge_strategy_override=strategy_override,
             free_vram_between_passes="disabled",
             vram_budget=vram_budget,
             cache_patches="enabled",
-            compress_patches="non_ties",
+            patch_compression="smart",
             svd_device="gpu",
             normalize_keys=tuner_data.get("normalize_keys", "disabled"),
-            behavior_profile="v1.2",
+            strategy_set="full",
             architecture_preset=tuner_data.get("architecture_preset", "auto"),
         )
 
@@ -5709,7 +5719,7 @@ class LoRAMergeSelector(LoRAOptimizer):
         lines = []
         lines.append(f"Merge Selector \u2014 Applied config #{selection}")
         mode_display = "per-prefix (auto)" if config["optimization_mode"] == "per_prefix" else config["merge_mode"]
-        lines.append(f"  Mode: {mode_display} | Quality: {config['merge_quality']}")
+        lines.append(f"  Mode: {mode_display} | Refinement: {config['merge_refinement']}")
         if config["sparsification"] != "disabled":
             lines.append(f"  Sparsification: {config['sparsification']} "
                          f"(density={config['sparsification_density']})")
@@ -6415,34 +6425,66 @@ class LoRACompatibilityAnalyzer(LoRAOptimizer):
                 idx = group[0]
                 info["type"] = "solo"
                 info["strength"] = active_loras[idx]["strength"]
-                # Find opposing LoRAs
+                # Find opposing LoRAs and check independence
                 opposing = []
+                n_independent = 0
                 for other_idx in range(n_loras):
                     if other_idx == idx:
                         continue
                     key = (min(idx, other_idx), max(idx, other_idx))
                     cs = pairwise_similarities.get(key, 0.0)
+                    sp = pair_shared_prefixes.get(key, 1)
+                    if sp == 0:
+                        n_independent += 1
                     if cs < -0.05:
                         opposing.append((active_loras[other_idx]["name"], cs))
                 opposing.sort(key=lambda x: x[1])
                 info["opposing"] = opposing
+                # Determine why this LoRA is solo
+                n_others = n_loras - 1
+                if n_others > 0 and n_independent == n_others:
+                    info["solo_reason"] = "independent"
+                elif opposing:
+                    info["solo_reason"] = "opposing"
+                else:
+                    info["solo_reason"] = "low_compat"
             else:
                 info["type"] = "merge"
                 # Compute intra-group stats
                 conflict_by_pair = {(pc["i"], pc["j"]): pc["ratio"] for pc in pairwise_conflicts}
+                shared_prefixes_by_pair = {(pc["i"], pc["j"]): pc.get("shared_prefixes", 1) for pc in pairwise_conflicts}
                 intra_cos = []
                 intra_conflict = []
+                intra_independent = 0
+                n_pairs = 0
                 for a_pos in range(len(group)):
                     for b_pos in range(a_pos + 1, len(group)):
                         key = (min(group[a_pos], group[b_pos]), max(group[a_pos], group[b_pos]))
-                        cs = pairwise_similarities.get(key, 0.0)
-                        cr = conflict_by_pair.get(key, 0.0)
-                        intra_cos.append(cs)
-                        intra_conflict.append(cr)
+                        n_pairs += 1
+                        sp = shared_prefixes_by_pair.get(key, 1)
+                        if sp == 0:
+                            # No shared keys = perfectly independent
+                            intra_cos.append(0.0)
+                            intra_conflict.append(0.0)
+                            intra_independent += 1
+                        else:
+                            cs = pairwise_similarities.get(key, 0.0)
+                            cr = conflict_by_pair.get(key, 0.0)
+                            intra_cos.append(cs)
+                            intra_conflict.append(cr)
                 info["avg_cos_sim"] = sum(intra_cos) / len(intra_cos) if intra_cos else 0.0
                 info["avg_conflict"] = sum(intra_conflict) / len(intra_conflict) if intra_conflict else 0.0
-                avg_compat = sum(cs * (1.0 - cr) for cs, cr in zip(intra_cos, intra_conflict)) / len(intra_cos) if intra_cos else 0.0
-                if avg_compat > 0.2:
+                info["all_independent"] = intra_independent == n_pairs and n_pairs > 0
+                # For avg_compat, treat independent pairs as 1.0 (fully compatible)
+                # The loop stored 0.0 cos / 0.0 conflict for independent pairs,
+                # so their cos*(1-conflict) = 0.0. Add back 1.0 for each.
+                if n_pairs > 0:
+                    compat_sum = sum(cs * (1.0 - cr) for cs, cr in zip(intra_cos, intra_conflict))
+                    compat_sum += intra_independent * 1.0
+                    avg_compat = compat_sum / n_pairs
+                else:
+                    avg_compat = 0.0
+                if info["all_independent"] or avg_compat > 0.2:
                     info["confidence"] = "High"
                 elif avg_compat > 0.05:
                     info["confidence"] = "Moderate"
@@ -6545,7 +6587,13 @@ class LoRACompatibilityAnalyzer(LoRAOptimizer):
         # --- Generate heatmap (use raw compat without baseline for visual differentiation) ---
         raw_matrix = self._compute_raw_compat_matrix(pairwise_similarities, pairwise_conflicts, n_loras)
         display_names = [os.path.splitext(os.path.basename(item["name"]))[0] for item in active_loras]
-        heatmap = self._generate_heatmap(raw_matrix, display_names, groups)
+        # Build set of independent pairs for heatmap
+        independent_pairs = set()
+        for pc in pairwise_conflicts:
+            if pc.get("shared_prefixes", 1) == 0:
+                independent_pairs.add((pc["i"], pc["j"]))
+                independent_pairs.add((pc["j"], pc["i"]))
+        heatmap = self._generate_heatmap(raw_matrix, display_names, groups, independent_pairs)
 
         # --- Build group data for UI (auto-create LoRA Stack nodes) ---
         groups_for_ui = []
@@ -6641,7 +6689,7 @@ class LoRACompatibilityAnalyzer(LoRAOptimizer):
         return groups
 
     @staticmethod
-    def _generate_heatmap(compat_matrix, lora_names, groups):
+    def _generate_heatmap(compat_matrix, lora_names, groups, independent_pairs=None):
         """Generate N×N heatmap as torch IMAGE tensor using PIL."""
         from PIL import Image, ImageDraw, ImageFont
         import numpy as np
@@ -6696,6 +6744,10 @@ class LoRACompatibilityAnalyzer(LoRAOptimizer):
                 if orig_i == orig_j:
                     color = (80, 80, 80)
                     val_text = "-"
+                elif independent_pairs and (orig_i, orig_j) in independent_pairs:
+                    # Distinct blue-green for independent (no shared keys) pairs
+                    color = (40, 140, 180)
+                    val_text = "indep"
                 else:
                     val = compat_matrix[orig_i][orig_j]
                     color = compat_to_color(val)
@@ -6775,6 +6827,21 @@ class LoRACompatibilityAnalyzer(LoRAOptimizer):
                      f"Avg cosine similarity: {collection_stats['avg_cos_sim']:.2f}")
         lines.append("")
 
+        # --- Per-LoRA Summary ---
+        lines.append("-" * 30 + " LoRA Summary " + "-" * 30)
+        lines.append("")
+        # Compute relative magnitude
+        l2_values = [s["l2_mean"] for s in lora_stats]
+        mean_l2 = sum(l2_values) / len(l2_values) if l2_values else 1.0
+        for i, stat in enumerate(lora_stats):
+            name = _dn(stat["name"])
+            rank = stat["avg_rank"]
+            keys = stat["key_count"]
+            rel_mag = stat["l2_mean"] / mean_l2 if mean_l2 > 0 else 0.0
+            mag_label = f"{rel_mag:.1f}x" if abs(rel_mag - 1.0) > 0.15 else "avg"
+            lines.append(f"  {name:<28s}  rank: {rank:<6.0f}  keys: {keys:<4d}  magnitude: {mag_label}")
+        lines.append("")
+
         # --- Recommended Groups ---
         lines.append("-" * 30 + " Recommended Groups " + "-" * 30)
         lines.append("")
@@ -6789,15 +6856,27 @@ class LoRACompatibilityAnalyzer(LoRAOptimizer):
 
             group_num += 1
             confidence = gi["confidence"]
-            label = "Safe to combine" if confidence == "Low" else "Merge together"
+            if gi.get("all_independent"):
+                label = "Independent — no overlapping keys, safe to stack"
+            elif confidence == "Low":
+                label = "Safe to combine"
+            else:
+                label = "Merge together"
             lines.append(f"Group {group_num} -- {label} (compatibility: {confidence})")
             for idx in indices:
-                strength = gi["strengths"].get(idx, active_loras[idx]["strength"])
+                suggested = gi["strengths"].get(idx, active_loras[idx]["strength"])
+                original = active_loras[idx]["strength"]
                 name = _dn(active_loras[idx]["name"])
-                lines.append(f"  * {name:<28s} strength {strength:.2f}")
-            lines.append(f"  Avg cosine sim: {gi['avg_cos_sim']:.2f} | "
-                        f"Avg conflict: {gi['avg_conflict']:.0%}")
-            lines.append(f"  Suggested merge: {gi['suggested_merge']}")
+                if abs(suggested - original) > 0.005:
+                    lines.append(f"  * {name:<28s} strength {suggested:.2f} (was {original:.2f})")
+                else:
+                    lines.append(f"  * {name:<28s} strength {suggested:.2f}")
+            if gi.get("all_independent"):
+                lines.append("  No overlapping keys — stack these LoRAs, no merge needed.")
+            else:
+                lines.append(f"  Avg cosine sim: {gi['avg_cos_sim']:.2f} | "
+                            f"Avg conflict: {gi['avg_conflict']:.0%}")
+                lines.append(f"  Suggested merge: {gi['suggested_merge']}")
             lines.append("")
 
         if solo_entries:
@@ -6806,10 +6885,21 @@ class LoRACompatibilityAnalyzer(LoRAOptimizer):
                 idx = gi["indices"][0]
                 name = _dn(active_loras[idx]["name"])
                 strength = gi["strength"]
-                lines.append(f"  * {name:<28s} strength {strength:.2f}")
-                if gi["opposing"]:
+                reason = gi.get("solo_reason", "low_compat")
+                if reason == "independent":
+                    lines.append(f"  * {name:<28s} strength {strength:.2f}")
+                    lines.append(f"    No shared keys with other LoRAs — targets different layers.")
+                elif reason == "opposing":
+                    lines.append(f"  * {name:<28s} strength {strength:.2f}")
                     opp_strs = [f"{_dn(oname)} (cos: {cs:.2f})" for oname, cs in gi["opposing"][:3]]
                     lines.append(f"    Opposes: {', '.join(opp_strs)}")
+                else:
+                    lines.append(f"  * {name:<28s} strength {strength:.2f}")
+                    if gi["opposing"]:
+                        opp_strs = [f"{_dn(oname)} (cos: {cs:.2f})" for oname, cs in gi["opposing"][:3]]
+                        lines.append(f"    Opposes: {', '.join(opp_strs)}")
+                    else:
+                        lines.append(f"    Low compatibility with all other LoRAs.")
             lines.append("")
 
         # --- Warnings ---
@@ -6835,12 +6925,15 @@ class LoRACompatibilityAnalyzer(LoRAOptimizer):
         lines.append("-" * 30 + " Pairwise Compatibility " + "-" * 30)
         lines.append("")
 
-        # Sort by compat score descending
-        sorted_pairs = sorted(pairwise_conflicts, key=lambda p: p["cosine_sim"] * (1.0 - p["ratio"]), reverse=True)
+        # Sort by compat score descending; independent (no shared keys) pairs sort first
+        sorted_pairs = sorted(pairwise_conflicts, key=lambda p: 1.0 if p.get("shared_prefixes", 1) == 0 else p["cosine_sim"] * (1.0 - p["ratio"]), reverse=True)
         # Compute max pair label width for right-aligned columns
         pair_labels = [_dn(pc["pair"]) for pc in sorted_pairs]
         max_pair_w = max((len(p) for p in pair_labels), default=45)
         for pc, pair_label in zip(sorted_pairs, pair_labels):
+            if pc.get("shared_prefixes", 1) == 0:
+                lines.append(f"  {pair_label:<{max_pair_w}s}  Independent (no shared keys)")
+                continue
             conflict = pc["ratio"]
             cos = round(pc["cosine_sim"], 2) + 0.0  # avoid -0.00
             compat = round(pc["cosine_sim"] * (1.0 - conflict), 2) + 0.0  # avoid -0.00
@@ -6849,8 +6942,6 @@ class LoRACompatibilityAnalyzer(LoRAOptimizer):
                 indicator = " [OK]"
             elif compat < -0.05:
                 indicator = " [!!]"
-            if pc.get("shared_prefixes", 1) == 0:
-                indicator += " (no shared keys)"
             lines.append(f"  {pair_label:<{max_pair_w}s}  "
                         f"cos:{cos:6.2f}  conflict:{conflict:5.0%}  compat:{compat:6.2f}{indicator}")
         lines.append("")
