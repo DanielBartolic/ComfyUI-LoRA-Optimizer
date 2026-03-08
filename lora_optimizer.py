@@ -1921,9 +1921,7 @@ class _LoRAMergeBase:
                 if conflict_frac > 0.40:
                     del conflict_mask
                     is_conflict = False
-                    logging.info(f"[LoRA Optimizer]   Skipping conflict-aware sparsification "
-                                 f"(conflict mask covers {conflict_frac:.0%} of positions — "
-                                 f"likely base-rate noise from orthogonal LoRAs)")
+                    self._sparsification_skipped = getattr(self, '_sparsification_skipped', 0) + 1
 
             if is_conflict:
                 is_dare = sparsification == "dare_conflict"
@@ -4741,6 +4739,11 @@ class LoRAOptimizer(_LoRAMergeBase):
                          f"{strategy_counts.get('weighted_average', 0)} avg, "
                          f"{strategy_counts.get('consensus', 0)} cons, "
                          f"{strategy_counts.get('ties', 0)} ties")
+        spars_skipped = getattr(self, '_sparsification_skipped', 0)
+        if spars_skipped > 0:
+            logging.info(f"[LoRA Optimizer]   Conflict-aware sparsification skipped for "
+                         f"{spars_skipped} groups (base-rate noise from orthogonal LoRAs)")
+            self._sparsification_skipped = 0
         if compressed_count > 0:
             passthrough_count = lowrank_count - compressed_count
             logging.info(f"[LoRA Optimizer]   SVD-compressed: {compressed_count} patches "
@@ -4880,10 +4883,7 @@ class LoRAOptimizer(_LoRAMergeBase):
         selected_params = {"mode": mode, "density": density, "sign_method": sign_method, "optimization_mode": optimization_mode}
         if optimization_mode == "per_prefix":
             selected_params["strategy_counts"] = dict(strategy_counts)
-        if not _skip_report:
-            report_path = self._save_report_to_disk(cache_key, lora_combo, auto_strength, report, selected_params)
-            if report_path:
-                logging.info(f"[LoRA Optimizer] Report saved to: {report_path}")
+        # Report is returned in the UI output — no need to also save to disk
 
         logging.info(f"[LoRA Optimizer] Done! {processed_keys} keys processed ({time.time() - t_start:.1f}s total)")
 
