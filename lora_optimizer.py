@@ -2942,8 +2942,8 @@ class LoRAOptimizer(_LoRAMergeBase):
             }
         }
 
-    RETURN_TYPES = ("MODEL", "CLIP", "STRING", "LORA_DATA")
-    RETURN_NAMES = ("model", "clip", "analysis_report", "lora_data")
+    RETURN_TYPES = ("MODEL", "CLIP", "STRING", "TUNER_DATA", "LORA_DATA")
+    RETURN_NAMES = ("model", "clip", "analysis_report", "tuner_data", "lora_data")
     FUNCTION = "execute_node"
     CATEGORY = "LoRA Optimizer"
     DESCRIPTION = "Auto-analyzes LoRA stack and selects optimal merge strategy per weight group. Outputs merged model + analysis report. Best for style/character LoRAs — apply edit, distillation (LCM/Turbo/Hyper), or DPO LoRAs via a standard Load LoRA node instead."
@@ -3876,7 +3876,7 @@ class LoRAOptimizer(_LoRAMergeBase):
                 logging.info(f"[AutoTuner Bridge] Passthrough mode — model already merged by AutoTuner")
 
                 # Return model as-is + UI data for JS widget sync
-                return {"result": (model, clip, report, None),
+                return {"result": (model, clip, report, tuner_data, None),
                         "ui": {"applied_settings": [json.dumps(config)]}}
 
         # --- manual: active merge mode ---
@@ -3914,13 +3914,13 @@ class LoRAOptimizer(_LoRAMergeBase):
         """
         # Normalize stack format (standard tuples or LoRAStack dicts)
         if not lora_stack or len(lora_stack) == 0:
-            return (model, clip, "No LoRAs in stack.", None)
+            return (model, clip, "No LoRAs in stack.", None, None)
 
         normalized_stack = self._normalize_stack(lora_stack, normalize_keys=normalize_keys)
         active_loras = [item for item in normalized_stack if item["strength"] != 0]
 
         if len(active_loras) == 0:
-            return (model, clip, "No LoRAs in stack (all zero strength or malformed).", None)
+            return (model, clip, "No LoRAs in stack (all zero strength or malformed).", None, None)
 
         # Resolve architecture preset from override or auto-detection
         preset_key, arch_preset = _resolve_arch_preset(
@@ -3990,7 +3990,7 @@ class LoRAOptimizer(_LoRAMergeBase):
                 new_clip.add_patches(clip_patches, clip_strength_out)
                 self._update_model_size(new_clip, clip_patches)
             logging.info(f"[LoRA Optimizer] Using cached merge result ({len(model_patches)} model + {len(clip_patches)} CLIP patches)")
-            return (new_model, new_clip, report, lora_data)
+            return (new_model, new_clip, report, None, lora_data)
 
         logging.info(f"[LoRA Optimizer] Starting analysis of {len(active_loras)} LoRAs")
         t_start = time.time()
@@ -4054,7 +4054,7 @@ class LoRAOptimizer(_LoRAMergeBase):
 
             if prefix_count == 0:
                 return (model, clip, "No compatible LoRA keys found. "
-                        "LoRAs may be incompatible with this model architecture.", None)
+                        "LoRAs may be incompatible with this model architecture.", None, None)
 
             # Log per-LoRA summaries
             for i, stat in enumerate(per_lora_stats):
@@ -4770,7 +4770,7 @@ class LoRAOptimizer(_LoRAMergeBase):
 
         logging.info(f"[LoRA Optimizer] Done! {processed_keys} keys processed ({time.time() - t_start:.1f}s total)")
 
-        return (new_model, new_clip, report, lora_data)
+        return (new_model, new_clip, report, None, lora_data)
 
 
 class LoRAOptimizerSimple(LoRAOptimizer):
@@ -4803,12 +4803,18 @@ class LoRAOptimizerSimple(LoRAOptimizer):
                     "default": 1.0, "min": 0.0, "max": 10.0, "step": 0.05,
                     "tooltip": "Multiplier for CLIP LoRA strengths (stacks with per-LoRA clip_strength when provided)."
                 }),
+                "tuner_data": ("TUNER_DATA", {
+                    "tooltip": "Connect from a Load Tuner Data or LoRA AutoTuner node. When connected, uses the best AutoTuner config instead of defaults."
+                }),
             },
         }
 
+    RETURN_TYPES = ("MODEL", "CLIP", "STRING")
+    RETURN_NAMES = ("model", "clip", "analysis_report")
     FUNCTION = "optimize_merge"
     DESCRIPTION = (
         "Simplified LoRA Optimizer — merges a LoRA stack with good defaults. "
+        "Accepts optional tuner_data to use AutoTuner results. "
         "Use LoRA Optimizer (Advanced) for sparsification, merge quality, "
         "SVD device, and other fine-tuning options."
     )
@@ -4833,19 +4839,26 @@ class LoRAOptimizerSimple(LoRAOptimizer):
     )
 
     def optimize_merge(self, model, lora_stack, output_strength,
-                       clip=None, clip_strength_multiplier=1.0, **_kwargs):
-        return super().optimize_merge(
+                       clip=None, clip_strength_multiplier=1.0,
+                       tuner_data=None, **_kwargs):
+        settings_source = "from_autotuner" if tuner_data is not None else "manual"
+        result = super().optimize_merge(
             model, lora_stack, output_strength,
             clip=clip, clip_strength_multiplier=clip_strength_multiplier,
+            tuner_data=tuner_data, settings_source=settings_source,
             **self._SIMPLE_DEFAULTS,
         )
+        return result[:3]
 
     @classmethod
     def IS_CHANGED(cls, model, lora_stack, output_strength,
-                   clip=None, clip_strength_multiplier=1.0, **_kwargs):
+                   clip=None, clip_strength_multiplier=1.0,
+                   tuner_data=None, **_kwargs):
         return LoRAOptimizer.IS_CHANGED(
             model, lora_stack, output_strength,
             clip=clip, clip_strength_multiplier=clip_strength_multiplier,
+            tuner_data=tuner_data,
+            settings_source="from_autotuner" if tuner_data is not None else "manual",
             **cls._SIMPLE_DEFAULTS,
         )
 
@@ -4976,7 +4989,7 @@ class LoRAAutoTuner(LoRAOptimizer):
             # Single LoRA: nothing to tune, delegate directly
             if output_mode == "tuning_only":
                 return (model, clip, "Single LoRA detected -- tuning_only passthrough.", "", None, None)
-            merged_model, merged_clip, report, lora_data = super().optimize_merge(
+            merged_model, merged_clip, report, _, lora_data = super().optimize_merge(
                 model, lora_stack, output_strength,
                 clip=clip, clip_strength_multiplier=clip_strength_multiplier,
                 normalize_keys=normalize_keys, behavior_profile="v1.2",
@@ -5185,7 +5198,7 @@ class LoRAAutoTuner(LoRAOptimizer):
             # merge_strategy_override would force one mode everywhere, defeating per-prefix logic.
             strategy_override = config["merge_mode"] if config["optimization_mode"] == "global" else ""
 
-            merged_model, merged_clip, _report, lora_data = super().optimize_merge(
+            merged_model, merged_clip, _report, _, lora_data = super().optimize_merge(
                 model, lora_stack, output_strength,
                 clip=clip,
                 clip_strength_multiplier=clip_strength_multiplier,
@@ -5267,7 +5280,7 @@ class LoRAAutoTuner(LoRAOptimizer):
                          f"({best_config['merge_mode']}, {best_config['merge_quality']})...")
             t_final = time.time()
             strategy_override = best_config["merge_mode"] if best_config["optimization_mode"] == "global" else ""
-            best_model, best_clip, best_analysis_report, best_lora_data = super().optimize_merge(
+            best_model, best_clip, best_analysis_report, _, best_lora_data = super().optimize_merge(
                 model, lora_stack, output_strength,
                 clip=clip,
                 clip_strength_multiplier=clip_strength_multiplier,
@@ -5614,7 +5627,7 @@ class LoRAMergeSelector(LoRAOptimizer):
         # In per_prefix mode, let the optimizer auto-select strategy per prefix.
         strategy_override = config["merge_mode"] if config["optimization_mode"] == "global" else ""
 
-        merged_model, merged_clip, _report, _lora_data = super().optimize_merge(
+        merged_model, merged_clip, _report, _, _lora_data = super().optimize_merge(
             model, lora_stack, output_strength,
             clip=clip,
             clip_strength_multiplier=clip_strength_multiplier,
@@ -5727,7 +5740,7 @@ class WanVideoLoRAOptimizer(LoRAOptimizer):
         kwargs.pop("clip", None)
         kwargs.pop("clip_strength_multiplier", None)
         kwargs.pop("free_vram_between_passes", None)
-        model_out, _clip, report, lora_data = super().optimize_merge(
+        model_out, _clip, report, _, lora_data = super().optimize_merge(
             model, lora_stack, output_strength,
             clip=None, clip_strength_multiplier=1.0, **kwargs
         )
@@ -5963,14 +5976,17 @@ class SaveMergedLoRA:
 
 
 class SaveTunerData:
-    """Saves AutoTuner results (TUNER_DATA) to a JSON file for later reuse."""
+    """Saves AutoTuner results (TUNER_DATA) to a .tuner file for later reuse."""
 
     @classmethod
     def INPUT_TYPES(cls):
+        tuner_folders = folder_paths.get_folder_paths("tuner_data")
+        folder_choices = tuner_folders if tuner_folders else [TUNER_DATA_DIR]
         return {
             "required": {
                 "tuner_data": ("TUNER_DATA", {"tooltip": "Connect the tuner_data output from LoRA AutoTuner."}),
-                "filename": ("STRING", {"default": "tuner_data", "tooltip": "Filename (saved to models/tuner_data/). Absolute path saves to that location instead."}),
+                "save_folder": (folder_choices, {"tooltip": "Which tuner_data folder to save into. Lists all configured paths (from extra_model_paths.yaml and defaults)."}),
+                "filename": ("STRING", {"default": "tuner_data", "tooltip": "Filename. Subdirectories allowed (e.g. 'results/experiment1'). Extension .tuner is added automatically (.json also accepted)."}),
             }
         }
 
@@ -5979,14 +5995,15 @@ class SaveTunerData:
     FUNCTION = "save_tuner_data"
     CATEGORY = "LoRA Optimizer"
     OUTPUT_NODE = True
-    DESCRIPTION = "Saves AutoTuner results to a JSON file so they can be reloaded later without re-running the tuner."
+    DESCRIPTION = "Saves AutoTuner results to a .tuner file so they can be reloaded later without re-running the tuner."
 
-    def save_tuner_data(self, tuner_data, filename):
+    def save_tuner_data(self, tuner_data, save_folder, filename):
         if tuner_data is None:
             return ("",)
-        base = filename if filename.endswith(".json") else f"{filename}.json"
-        save_path = os.path.join(TUNER_DATA_DIR, base)
-        if not os.path.realpath(save_path).startswith(os.path.realpath(TUNER_DATA_DIR) + os.sep):
+        save_dir = save_folder
+        base = filename if filename.endswith((".json", ".tuner")) else f"{filename}.tuner"
+        save_path = os.path.join(save_dir, base)
+        if not os.path.realpath(save_path).startswith(os.path.realpath(save_dir) + os.sep):
             raise ValueError(f"[Save Tuner Data] Path escapes tuner_data directory: {filename}")
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
         with open(save_path, "w") as f:
