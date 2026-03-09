@@ -167,11 +167,132 @@ function syncOppositeSwitch(sourceWidget, sourceNode, targetFinder, mapping) {
     }
 }
 
+// --- Node Swap: right-click "Swap to AutoTuner / Optimizer" ---
+
+// Widgets that exist on both nodes (values transfer directly on swap)
+const SHARED_WIDGETS = [
+    "output_strength", "clip_strength_multiplier", "normalize_keys",
+    "architecture_preset", "auto_strength_floor", "cache_patches", "vram_budget",
+];
+
+const SWAP_PAIRS = {
+    "LoRAOptimizer": "LoRAAutoTuner",
+    "LoRAAutoTuner": "LoRAOptimizer",
+};
+
+const SWAP_LABELS = {
+    "LoRAOptimizer": "Swap to LoRA AutoTuner",
+    "LoRAAutoTuner": "Swap to LoRA Optimizer",
+};
+
+// Output slot name mapping:  src output name → dst output name
+// Optimizer:  model, clip, analysis_report, tuner_data, lora_data
+// AutoTuner:  model, clip, report, analysis_report, tuner_data, lora_data
+// We match by name; "report" (AutoTuner-only) has no Optimizer equivalent.
+// Input slots match by name (model, lora_stack, clip, etc.).
+
+function swapNode(oldNode) {
+    const targetClass = SWAP_PAIRS[oldNode.comfyClass];
+    if (!targetClass) return;
+
+    const newNode = LiteGraph.createNode(targetClass);
+    if (!newNode) return;
+
+    app.graph.add(newNode);
+
+    // Copy position and size
+    newNode.pos[0] = oldNode.pos[0];
+    newNode.pos[1] = oldNode.pos[1];
+    newNode.size[0] = Math.max(oldNode.size[0], newNode.size[0]);
+
+    // Transfer shared widget values
+    for (const name of SHARED_WIDGETS) {
+        const src = findWidget(oldNode, name);
+        const dst = findWidget(newNode, name);
+        if (src && dst) {
+            dst.value = src.value;
+        }
+    }
+
+    // Reconnect inputs by matching slot name
+    if (oldNode.inputs) {
+        for (let i = 0; i < oldNode.inputs.length; i++) {
+            const oldInput = oldNode.inputs[i];
+            if (oldInput.link == null) continue;
+            const linkInfo = app.graph.links[oldInput.link];
+            if (!linkInfo) continue;
+
+            // Find matching input slot on new node by name
+            const newSlotIdx = newNode.inputs
+                ? newNode.inputs.findIndex((inp) => inp.name === oldInput.name)
+                : -1;
+            if (newSlotIdx === -1) continue;
+
+            const sourceNode = app.graph.getNodeById(linkInfo.origin_id);
+            if (!sourceNode) continue;
+
+            sourceNode.connect(linkInfo.origin_slot, newNode, newSlotIdx);
+        }
+    }
+
+    // Reconnect outputs by matching slot name
+    if (oldNode.outputs) {
+        for (let i = 0; i < oldNode.outputs.length; i++) {
+            const oldOutput = oldNode.outputs[i];
+            if (!oldOutput.links || oldOutput.links.length === 0) continue;
+
+            // Find matching output slot on new node by name
+            const newSlotIdx = newNode.outputs
+                ? newNode.outputs.findIndex((out) => out.name === oldOutput.name)
+                : -1;
+            if (newSlotIdx === -1) continue;
+
+            // Iterate a copy — link list mutates as we disconnect/reconnect
+            for (const linkId of [...oldOutput.links]) {
+                const linkInfo = app.graph.links[linkId];
+                if (!linkInfo) continue;
+                const targetNode = app.graph.getNodeById(linkInfo.target_id);
+                if (!targetNode) continue;
+
+                newNode.connect(newSlotIdx, targetNode, linkInfo.target_slot);
+            }
+        }
+    }
+
+    // Remove old node
+    app.graph.remove(oldNode);
+
+    // Resize new node to fit widgets
+    setTimeout(() => {
+        const computed = newNode.computeSize();
+        newNode.setSize([Math.max(newNode.size[0], computed[0]), computed[1]]);
+        app.canvas?.setDirty?.(true, true);
+    }, 0);
+}
+
+function addSwapMenuOption(node) {
+    const label = SWAP_LABELS[node.comfyClass];
+    if (!label) return;
+
+    const origGetExtra = node.getExtraMenuOptions;
+    node.getExtraMenuOptions = function (_, options) {
+        if (origGetExtra) origGetExtra.apply(this, arguments);
+
+        // Insert before the last item (which is usually "Properties")
+        options.splice(-1, 0, null, {
+            content: label,
+            callback: () => swapNode(this),
+        });
+    };
+}
+
 // --- LoRAOptimizer extension ---
 app.registerExtension({
     name: "LoRAOptimizer.AutoTunerBridge",
     nodeCreated(node) {
         if (node.comfyClass !== "LoRAOptimizer") return;
+
+        addSwapMenuOption(node);
 
         // Widget sync on execution (applied_settings from Python)
         const origOnExecuted = node.onExecuted;
@@ -227,6 +348,8 @@ app.registerExtension({
     name: "LoRAOptimizer.AutoTunerOutputMode",
     nodeCreated(node) {
         if (node.comfyClass !== "LoRAAutoTuner") return;
+
+        addSwapMenuOption(node);
 
         // Opposing switch sync: output_mode → settings_source
         const outputModeWidget = findWidget(node, "output_mode");

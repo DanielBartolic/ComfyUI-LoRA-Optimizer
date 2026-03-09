@@ -66,9 +66,99 @@ Optional `lora_stack` input accepts a previous stack for chaining with other Sta
 
 ---
 
+## LoRA Merge Settings
+
+Shared configuration node for parameters common to both the optimizer and AutoTuner.
+
+### Inputs
+
+| Input | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `normalize_keys` | COMBO | Yes | `enabled` | `enabled`, `disabled` — architecture-aware key normalization |
+| `architecture_preset` | COMBO | Yes | `auto` | `auto`, `sd_unet`, `dit`, `llm` — numeric threshold tuning |
+| `auto_strength_floor` | FLOAT | Yes | -1.0 | Minimum auto-strength scale factor for orthogonal LoRAs (`-1` = architecture default) |
+| `decision_smoothing` | FLOAT | Yes | 0.25 | Smooth per-prefix decision metrics toward block averages (0 disables) |
+| `smooth_slerp_gate` | BOOLEAN | Yes | `false` | Use per-prefix cosine similarity for SLERP gate instead of collection average |
+| `vram_budget` | FLOAT | Yes | 0.0 | Fraction of free VRAM for keeping patches on GPU (0.0–1.0) |
+| `cache_patches` | COMBO | Yes | `enabled` | `enabled`, `disabled` — keep merge in RAM for re-execution |
+
+### Outputs
+
+| Output | Type | Description |
+|--------|------|-------------|
+| `merge_settings` | MERGE_SETTINGS | Shared settings for Optimizer Settings or AutoTuner Settings |
+
+---
+
+## LoRA Optimizer Settings
+
+Optimizer-specific configuration. Accepts optional Merge Settings input.
+
+### Inputs
+
+| Input | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `auto_strength` | COMBO | Yes | `enabled` | `enabled`, `disabled` — interference-aware energy normalization |
+| `optimization_mode` | COMBO | Yes | `per_prefix` | `per_prefix`, `global`, `additive` |
+| `merge_refinement` | COMBO | Yes | `none` | `none`, `refine`, `full` |
+| `sparsification` | COMBO | Yes | `disabled` | `disabled`, `dare`, `della`, `dare_conflict`, `della_conflict` |
+| `sparsification_density` | FLOAT | Yes | 0.7 | Fraction of parameters to keep (0.01–1.0) |
+| `dare_dampening` | FLOAT | Yes | 0.0 | DAREx noise reduction (0–1.0) |
+| `patch_compression` | COMBO | Yes | `smart` | `smart`, `aggressive`, `disabled` |
+| `svd_device` | COMBO | Yes | `gpu` | `gpu`, `cpu` — device for SVD compression |
+| `free_vram_between_passes` | COMBO | Yes | `disabled` | `enabled`, `disabled` — release GPU cache between passes |
+| `strategy_set` | COMBO | Yes | `full` | `full`, `no_slerp`, `basic` — strategy selection logic |
+
+### Optional Inputs
+
+| Input | Type | Description |
+|-------|------|-------------|
+| `merge_settings` | MERGE_SETTINGS | Shared settings from LoRA Merge Settings node |
+| `merge_strategy_override` | STRING | Force a specific merge strategy (connect from Conflict Editor) |
+
+### Outputs
+
+| Output | Type | Description |
+|--------|------|-------------|
+| `settings` | OPTIMIZER_SETTINGS | Connect to LoRA Optimizer's `settings` input |
+
+---
+
+## LoRA AutoTuner Settings
+
+AutoTuner-specific configuration. Accepts optional Merge Settings input.
+
+### Inputs
+
+| Input | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `top_n` | INT | Yes | 3 | Number of candidates to merge and score (1–10) |
+| `scoring_svd` | COMBO | Yes | `disabled` | `enabled`, `disabled` — SVD-based effective rank scoring |
+| `scoring_device` | COMBO | Yes | `gpu` | `cpu`, `gpu` — device for SVD scoring |
+| `scoring_speed` | COMBO | Yes | `turbo` | `full`, `fast`, `turbo`, `turbo+` — subsample scoring |
+| `scoring_formula` | COMBO | Yes | `v2` | `v2`, `v1` — scoring formula version |
+| `diff_cache_mode` | COMBO | Yes | `auto` | `disabled`, `auto`, `ram`, `disk` |
+| `diff_cache_ram_pct` | FLOAT | Yes | 0.5 | RAM fraction for auto diff cache (0.1–0.9) |
+| `record_dataset` | COMBO | Yes | `disabled` | `enabled`, `disabled` — save metrics to JSONL |
+
+### Optional Inputs
+
+| Input | Type | Description |
+|-------|------|-------------|
+| `merge_settings` | MERGE_SETTINGS | Shared settings from LoRA Merge Settings node |
+| `evaluator` | AUTOTUNER_EVALUATOR | External evaluator for prompt/reference scoring |
+
+### Outputs
+
+| Output | Type | Description |
+|--------|------|-------------|
+| `settings` | OPTIMIZER_SETTINGS | Connect to LoRA AutoTuner's settings input |
+
+---
+
 ## LoRA Optimizer
 
-The simplified auto-optimizer. Sensible defaults, minimal controls. Auto-strength is enabled by default.
+The simplified auto-optimizer. Sensible defaults, minimal controls. Auto-strength is enabled by default. Accepts optional `settings` and `tuner_data` inputs for advanced control without exposing all parameters.
 
 ### Inputs
 
@@ -78,9 +168,11 @@ The simplified auto-optimizer. Sensible defaults, minimal controls. Auto-strengt
 | `lora_stack` | LORA_STACK | Yes | — | Stack of LoRAs to merge |
 | `output_strength` | FLOAT | Yes | 1.0 | Master strength multiplier (0–10) |
 | `clip` | CLIP | No | — | Text encoder (if using CLIP LoRA keys) |
-| `clip_strength_multiplier` | FLOAT | Yes | 1.0 | CLIP strength relative to model strength (0–10) |
+| `clip_strength_multiplier` | FLOAT | No | 1.0 | CLIP strength relative to model strength (0–10) |
+| `tuner_data` | TUNER_DATA | No | — | AutoTuner result — applies the winning config's settings |
+| `settings` | OPTIMIZER_SETTINGS | No | — | From LoRA Optimizer Settings or LoRA AutoTuner Settings |
 
-Uses fixed defaults internally: `auto_strength=enabled`, `optimization_mode=per_prefix`, `merge_quality=standard`, `compress_patches=non_ties`, `vram_budget=0.0`.
+When no `settings` node is connected, uses built-in defaults: `auto_strength=enabled`, `optimization_mode=per_prefix`, `merge_refinement=none`, `patch_compression=smart`, `vram_budget=0.0`.
 
 ### Outputs
 
@@ -88,14 +180,17 @@ Uses fixed defaults internally: `auto_strength=enabled`, `optimization_mode=per_
 |--------|------|-------------|
 | `MODEL` | MODEL | Patched model ready for sampling |
 | `CLIP` | CLIP | Patched text encoder |
-| `report` | STRING | Analysis report with block strategy map |
+| `analysis_report` | STRING | Analysis report with block strategy map |
+| `tuner_data` | TUNER_DATA | For Merge Selector or Save Tuner Data |
 | `LORA_DATA` | LORA_DATA | Merged patches for downstream nodes |
 
 ---
 
-## LoRA Optimizer (Advanced)
+## LoRA Optimizer (Legacy)
 
-Full-featured optimizer with all parameters exposed.
+> **Deprecated:** Superseded by **LoRA Optimizer** + **Settings nodes**. Use the Legacy variant only for the AutoTuner ↔ Optimizer bridge workflow (which requires `settings_source`).
+
+Full-featured optimizer with all parameters on one node.
 
 ### Inputs
 
@@ -103,19 +198,22 @@ All inputs from the simple variant, plus:
 
 | Input | Type | Default | Description |
 |-------|------|---------|-------------|
-| `auto_strength` | COMBO | disabled | `enabled` / `disabled` — interference-aware energy normalization |
-| `optimization_mode` | COMBO | per_prefix | `per_prefix`, `global`, `weighted_sum_only` |
-| `merge_quality` | COMBO | standard | `standard`, `enhanced`, `maximum` |
+| `auto_strength` | COMBO | enabled | `enabled` / `disabled` — interference-aware energy normalization |
+| `optimization_mode` | COMBO | per_prefix | `per_prefix`, `global`, `additive` |
+| `merge_refinement` | COMBO | none | `none`, `refine`, `full` |
 | `sparsification` | COMBO | disabled | `disabled`, `dare`, `della`, `dare_conflict`, `della_conflict` |
 | `sparsification_density` | FLOAT | 0.7 | Fraction of parameters to keep (0.01–1.0) |
 | `dare_dampening` | FLOAT | 0.0 | DAREx noise reduction (0–1.0, only affects DARE modes) |
-| `compress_patches` | COMBO | non_ties | `non_ties`, `all`, `disabled` |
+| `patch_compression` | COMBO | smart | `smart`, `aggressive`, `disabled` |
 | `svd_device` | COMBO | gpu | `gpu`, `cpu` — device for SVD compression |
 | `cache_patches` | COMBO | enabled | `enabled`, `disabled` — keep merge in RAM for re-execution |
 | `free_vram_between_passes` | COMBO | disabled | `enabled`, `disabled` — release GPU cache between passes |
-| `normalize_keys` | COMBO | disabled | `enabled`, `disabled` — architecture-aware key normalization |
-| `behavior_profile` | COMBO | v1.2 | `v1.2`, `no_slerp`, `classic` — strategy selection logic |
+| `normalize_keys` | COMBO | enabled | `enabled`, `disabled` — architecture-aware key normalization |
+| `strategy_set` | COMBO | full | `full`, `no_slerp`, `basic` — strategy selection logic |
 | `architecture_preset` | COMBO | auto | `auto`, `sd_unet`, `dit`, `llm` — numeric threshold tuning |
+| `auto_strength_floor` | FLOAT | -1.0 | Minimum auto-strength scale factor for orthogonal LoRAs (`-1` = architecture default) |
+| `decision_smoothing` | FLOAT | 0.25 | Smooth per-prefix decision metrics toward the surrounding block average (0 disables smoothing) |
+| `smooth_slerp_gate` | BOOLEAN | false | Use per-prefix cosine similarity for SLERP gate instead of collection average |
 | `vram_budget` | FLOAT | 0.0 | Fraction of free VRAM for keeping patches on GPU (0.0–1.0) |
 
 ### Optional Inputs
@@ -123,38 +221,48 @@ All inputs from the simple variant, plus:
 | Input | Type | Description |
 |-------|------|-------------|
 | `merge_strategy_override` | STRING | Force a specific merge strategy (connect from Conflict Editor) |
+| `tuner_data` | TUNER_DATA | Optional AutoTuner result used when `settings_source=from_autotuner` or `from_tuner_data` |
+| `settings_source` | COMBO | `manual`, `from_autotuner`, or `from_tuner_data`; controls whether widgets or AutoTuner config drive the node |
 
 ### Outputs
 
-Same as the simple variant: `MODEL`, `CLIP`, `report` (STRING), `LORA_DATA`.
+Same as the simple variant: `MODEL`, `CLIP`, `report` (STRING), `tuner_data` (TUNER_DATA), `LORA_DATA`.
 
 ---
 
 ## LoRA AutoTuner
 
-Automated parameter sweep that finds the optimal merge configuration.
+Automated parameter sweep that ranks merge configurations.
 
 ### Inputs
 
-All inputs from the Advanced optimizer, plus:
+All inputs from the Legacy optimizer, plus:
 
 | Input | Type | Default | Description |
 |-------|------|---------|-------------|
 | `top_n` | INT | 3 | Number of candidates to actually merge and score (1–10) |
 | `scoring_svd` | COMBO | disabled | `enabled`, `disabled` — SVD-based effective rank scoring |
-| `scoring_device` | COMBO | cpu | `cpu`, `gpu` — device for SVD scoring (GPU is 10–50x faster) |
+| `scoring_device` | COMBO | gpu | `cpu`, `gpu` — device for SVD scoring (GPU is 10–50x faster) |
+| `scoring_speed` | COMBO | turbo | `full`, `fast`, `turbo`, `turbo+` — subsample scoring for faster sweeps |
+| `auto_strength_floor` | FLOAT | -1.0 | Minimum auto-strength scale factor for orthogonal LoRAs |
+| `decision_smoothing` | FLOAT | 0.25 | Same smoothing control as the optimizer; affects both ranking and final merge |
+| `evaluator` | AUTOTUNER_EVALUATOR | — | Optional external evaluator hook for prompt/reference scoring |
 | `record_dataset` | COMBO | disabled | `enabled`, `disabled` — save metrics to JSONL for research |
+| `cache_patches` | COMBO | enabled | Cache the final AutoTuner result in RAM for fast re-execution |
+| `diff_cache_mode` | COMBO | auto | Diff cache mode across candidates: `disabled`, `auto`, `ram`, `disk` |
+| `diff_cache_ram_pct` | FLOAT | 0.5 | RAM fraction used before `auto` diff cache spills to disk |
 | `vram_budget` | FLOAT | 0.0 | Fraction of free VRAM for patch placement |
 
 ### Outputs
 
 | Output | Type | Description |
 |--------|------|-------------|
-| `MODEL` | MODEL | Patched model from the best-scoring config |
+| `MODEL` | MODEL | Patched model from the top-ranked config |
 | `CLIP` | CLIP | Patched text encoder |
-| `report` | STRING | Ranked results with heuristic and measured scores |
+| `report` | STRING | Ranked results with heuristic, internal, and optional external scores |
+| `analysis_report` | STRING | Full optimizer analysis report for the top-ranked config |
 | `TUNER_DATA` | TUNER_DATA | All ranked configs for Merge Selector |
-| `LORA_DATA` | LORA_DATA | Merged patches from the best config |
+| `LORA_DATA` | LORA_DATA | Merged patches from the top-ranked config |
 
 Marked as `OUTPUT_NODE` for ComfyUI's re-execution optimization.
 
@@ -172,8 +280,11 @@ Applies a specific ranked configuration from AutoTuner results.
 |-------|------|----------|---------|-------------|
 | `model` | MODEL | Yes | — | Base model |
 | `tuner_data` | TUNER_DATA | Yes | — | Output from LoRA AutoTuner |
-| `selection` | INT | Yes | 1 | Which ranked config to apply (1 = best, 2 = second best, etc.) |
+| `selection` | INT | Yes | 1 | Which ranked config to apply (1 = top-ranked, 2 = next-ranked, etc.) |
 | `clip` | CLIP | No | — | Text encoder |
+| `clip_strength_multiplier` | FLOAT | No | 1.0 | CLIP strength multiplier when replaying the selected config |
+| `auto_strength_floor` | FLOAT | No | -1.0 | Manual override for orthogonal auto-strength floor; `-1` reuses tuner setting |
+| `decision_smoothing` | FLOAT | No | 0.25 | Smoothing used when replaying the selected config |
 
 Validates that the LoRA stack hasn't changed since the AutoTuner ran (via hash comparison).
 
@@ -234,7 +345,8 @@ Exports merged patches as a standalone `.safetensors` file usable with any stand
 | Input | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `lora_data` | LORA_DATA | Yes | — | From Optimizer, AutoTuner, or Merge Selector |
-| `filename` | STRING | Yes | `merged_lora` | Plain name → saves to ComfyUI loras folder. Absolute path → saves there |
+| `save_folder` | COMBO | Yes | first configured LoRA folder | Which configured ComfyUI LoRA directory to save into |
+| `filename` | STRING | Yes | `merged_lora` | File name relative to `save_folder`. Subdirectories allowed |
 | `save_rank` | INT | Yes | 0 | 0 = use existing layer ranks. Non-zero = force this rank via SVD |
 | `bake_strength` | COMBO | Yes | enabled | Bake `output_strength` so the saved LoRA works at strength 1.0 |
 
@@ -243,6 +355,72 @@ Exports merged patches as a standalone `.safetensors` file usable with any stand
 | Output | Type | Description |
 |--------|------|-------------|
 | `filepath` | STRING | Full path to the saved `.safetensors` file |
+
+---
+
+## Build AutoTuner Python Evaluator
+
+Builds an `AUTOTUNER_EVALUATOR` object from a Python module path + callable name.
+
+### Inputs
+
+| Input | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `module_path` | STRING | Yes | — | Python file path or importable module |
+| `callable_name` | STRING | Yes | `evaluate_candidate` | Callable that returns a float score or `{score, details}` |
+| `combine_mode` | COMBO | No | blend | `blend`, `external_only`, `multiply` |
+| `weight` | FLOAT | No | 0.5 | Blend weight when `combine_mode=blend` |
+| `context_json` | STRING | No | `{}` | JSON passed through as `context` to the evaluator |
+
+### Outputs
+
+| Output | Type | Description |
+|--------|------|-------------|
+| `evaluator` | AUTOTUNER_EVALUATOR | External evaluator spec for LoRA AutoTuner |
+
+---
+
+## Save / Load Tuner Data
+
+Persist AutoTuner rankings for reuse across optimizer runs.
+
+### Save Tuner Data Inputs
+
+| Input | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `tuner_data` | TUNER_DATA | Yes | — | Ranked AutoTuner results |
+| `save_folder` | COMBO | Yes | first configured tuner_data folder | Which configured `tuner_data` directory to save into |
+| `filename` | STRING | Yes | `tuner_data` | File name under `save_folder`. Subdirectories allowed; `.tuner` is added automatically unless `.json`/`.tuner` is supplied |
+| `overwrite` | BOOLEAN | Yes | `true` | Overwrite an existing file or append `_001`, `_002`, … to avoid clobbering |
+
+### Load Tuner Data Outputs
+
+| Output | Type | Description |
+|--------|------|-------------|
+| `tuner_data` | TUNER_DATA | Loaded AutoTuner results ready for Merge Selector |
+
+---
+
+## LoRA Compatibility Analyzer
+
+Pre-merge planning node that analyzes overlap, cosine similarity, and conflicts without applying a merge.
+
+### Inputs
+
+| Input | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `enabled` | BOOLEAN | Yes | `false` | Run the analyzer only when explicitly enabled |
+| `create_nodes` | BOOLEAN | Yes | `true` | When enabled, auto-creates LoraLoader nodes for solo LoRAs and LoRA Stack (Dynamic) nodes for merge groups based on the compatibility analysis |
+| `model` | MODEL | Yes | — | Base model used for target grouping and key mapping |
+| `lora_stack` | LORA_STACK | Yes | — | Stack to analyze |
+| `clip` | CLIP | No | — | Optional CLIP model for text-encoder LoRA keys (also used for CLIP-aware loader selection) |
+
+### Outputs
+
+| Output | Type | Description |
+|--------|------|-------------|
+| `report` | STRING | Human-readable compatibility report with suggested groups |
+| `compatibility_map` | IMAGE | Heatmap of pairwise compatibility values |
 
 ---
 
@@ -282,7 +460,7 @@ Optimizer variant for WanVideo models via [kijai's WanVideoWrapper](https://gith
 |--------|----------|----------|
 | Model input | `MODEL` | `WANVIDEOMODEL` |
 | CLIP | Supported | Not used |
-| `normalize_keys` default | disabled | **enabled** |
+| `normalize_keys` default | enabled | **enabled** |
 | `cache_patches` default | enabled | **disabled** |
 | `architecture_preset` default | auto | **dit** |
 
@@ -290,7 +468,7 @@ All merge algorithms work identically — TIES, DARE/DELLA, SVD compression, aut
 
 ### Inputs/Outputs
 
-Same as the Advanced optimizer, but with `WANVIDEOMODEL` replacing `MODEL` and no CLIP inputs/outputs. Outputs `LORA_DATA` for Save Merged LoRA.
+Same as the Legacy optimizer, but with `WANVIDEOMODEL` replacing `MODEL` and no CLIP inputs/outputs. Outputs `LORA_DATA` for Save Merged LoRA.
 
 ---
 

@@ -1,6 +1,6 @@
 # LoRA Optimizer Wiki
 
-A ComfyUI node suite that **automatically analyzes your LoRA stack** and selects the best merge strategy per weight group. Instead of blindly stacking LoRAs (which causes oversaturation and sign conflicts), the optimizer examines where LoRAs overlap, how much they conflict, and picks the optimal approach for each region independently.
+A ComfyUI node suite that **automatically analyzes your LoRA stack** and selects heuristic merge strategies per weight group. Instead of blindly stacking LoRAs (which causes oversaturation and sign conflicts), the optimizer examines where LoRAs overlap, how much they conflict, how aligned their subspaces are, and picks a local approach for each region independently.
 
 ---
 
@@ -8,7 +8,7 @@ A ComfyUI node suite that **automatically analyzes your LoRA stack** and selects
 
 1. Add a **LoRA Stack** (or **LoRA Stack (Dynamic)**) node
 2. Select your LoRAs and set strengths
-3. Connect to **LoRA Optimizer** (or the Advanced variant)
+3. Connect to **LoRA Optimizer** (optionally with Settings nodes for fine-grained control)
 4. Connect `MODEL` and optionally `CLIP` from your checkpoint loader
 5. Use the optimizer's `MODEL`/`CLIP` outputs for sampling
 
@@ -50,9 +50,11 @@ The optimizer handles everything automatically — conflict analysis, strategy s
 | **Architecture presets** | Tuned thresholds for UNet, DiT, and LLM architectures |
 | **Key normalization** | Mix LoRAs from any trainer (Kohya, AI-Toolkit, LyCORIS, diffusers, etc.) |
 | **SVD compression** | Re-compress merged patches to low-rank for ~32x RAM savings |
-| **AutoTuner** | Sweep 2,000+ parameter combinations to find the optimal config |
-| **Low memory** | Two-pass streaming architecture — peak VRAM ~260MB regardless of LoRA count |
-| **6 architectures** | FLUX, SDXL, Z-Image, Wan, LTX Video, Qwen-Image |
+| **AutoTuner** | Sweep 2,000+ parameter combinations and rank them by internal metrics or an external evaluator |
+| **Settings nodes** | Modular configuration: Merge Settings (shared), Optimizer Settings, AutoTuner Settings — optional, sensible defaults without them |
+| **Compatibility analyzer** | Planning node that groups merge-safe LoRAs, surfaces conflicts, and optionally auto-creates optimized node setups |
+| **Low memory** | Two-pass streaming architecture — peak memory scales with the largest active target group, not the full stack |
+| **8 architectures** | SD 1.5, SDXL, FLUX, Z-Image, Wan, LTX Video, ACE-Step, Qwen-Image |
 
 ---
 

@@ -34,17 +34,17 @@ Controls whether the optimizer picks strategies per-prefix or globally.
 |-------|----------|-------------|
 | `per_prefix` (default) | Each weight group gets its own strategy | Almost always — this is the main feature |
 | `global` | Single strategy for all prefixes | When you want consistent behavior across all layers |
-| `weighted_sum_only` | Force weighted sum everywhere | For distillation/edit LoRAs, or when combined with SVD compression for zero-loss output |
+| `additive` | Force weighted sum everywhere | For distillation/edit LoRAs, or when combined with SVD compression for zero-loss output |
 
-### `behavior_profile`
+### `strategy_set`
 
 Controls which merge strategies are available during auto-selection. This is about _strategy logic_ — which algorithms can be picked.
 
 | Value | Auto-selectable Strategies | When to Use |
 |-------|---------------------------|-------------|
-| `v1.2` (default) | TIES, weighted_average, SLERP, consensus | Recommended — full algorithm repertoire |
+| `full` (default) | TIES, weighted_average, SLERP, consensus | Recommended — full algorithm repertoire |
 | `no_slerp` | TIES, weighted_average, consensus | If SLERP produces undesirable results for your LoRAs |
-| `classic` | TIES, weighted_average only | Reproduce pre-1.2 behavior |
+| `basic` | TIES, weighted_average only | Reproduce pre-1.2 behavior |
 
 ### `architecture_preset`
 
@@ -118,34 +118,34 @@ DAREx-q enhancement for DARE modes only. Interpolates the rescaling factor towar
 
 ## Merge Quality
 
-### `merge_quality`
+### `merge_refinement`
 
 Controls additional processing techniques applied during merging. Higher quality = better conflict resolution at slight compute cost.
 
 | Level | Techniques Added | Cost |
 |-------|-----------------|------|
-| `standard` (default) | Element-wise sign voting only | Baseline |
-| `enhanced` | + DO-orthogonalization, column-wise voting, TALL-mask protection | Minimal extra compute, no extra VRAM |
-| `maximum` | + KnOTS SVD alignment (on top of enhanced) | More VRAM for SVD decomposition |
+| `none` (default) | Element-wise sign voting only | Baseline |
+| `refine` | + DO-orthogonalization, column-wise voting, TALL-mask protection | Minimal extra compute, no extra VRAM |
+| `full` | + KnOTS SVD alignment (on top of refine) | More VRAM for SVD decomposition |
 
 **Recommendations:**
-- Start with `standard` — it's often sufficient
-- Try `enhanced` if you see artifacts or loss of individual LoRA character
-- Use `maximum` for critical merges where quality matters most
+- Start with `none` — it's often sufficient
+- Try `refine` if you see artifacts or loss of individual LoRA character
+- Use `full` for critical merges where quality matters most
 - Best combined with conflict-aware sparsification (`dare_conflict` or `della_conflict`)
 
 ---
 
 ## Compression & Memory
 
-### `compress_patches`
+### `patch_compression`
 
 Re-compresses merged full-rank patches to low-rank via SVD, reducing RAM by ~32x.
 
 | Value | Compresses | Quality Loss |
 |-------|-----------|-------------|
-| `non_ties` (default) | weighted_sum and weighted_average prefixes | None (linear ops are exactly representable) |
-| `all` | All prefixes including TIES | Lossy on TIES prefixes (nonlinear ops produce full-rank) |
+| `smart` (default) | weighted_sum and weighted_average prefixes | None (linear ops are exactly representable) |
+| `aggressive` | All prefixes including TIES | Lossy on TIES prefixes (nonlinear ops produce full-rank) |
 | `disabled` | Nothing | None, but ~32x more RAM |
 
 ### `svd_device` (gpu / cpu)
@@ -169,6 +169,27 @@ Fraction of free VRAM to use for keeping merged patches on GPU.
 - 1.0 → use all available free VRAM
 
 Higher values = faster sampling (less CPU→GPU transfer) but more GPU memory used. Available on both the Optimizer and AutoTuner.
+
+---
+
+## Decision Smoothing
+
+### `decision_smoothing` (0.0 – 1.0, default 0.25)
+
+Blends each group's decision metrics toward the average of its surrounding block. Reduces jagged layer-to-layer strategy flips when the stack is noisy.
+
+- 0.0 → no smoothing (each prefix decides independently)
+- 0.25 → gentle smoothing (default — reduces noise while preserving real transitions)
+- 1.0 → full smoothing (all prefixes in a block use the same strategy)
+
+### `smooth_slerp_gate` (true / false, default false)
+
+When enabled, uses per-prefix cosine similarity (computed during Pass 1 analysis) for the SLERP interpolation gate instead of the collection-wide average. This makes the SLERP weight vary per layer based on local alignment.
+
+- `false` → single global SLERP weight from the average cosine similarity across all prefixes
+- `true` → per-prefix SLERP weight based on that prefix's local cosine similarity
+
+Enable when LoRAs have varying alignment across different model regions — some layers aligned, others orthogonal.
 
 ---
 
@@ -206,9 +227,55 @@ When enabled, computes SVD-based effective rank as part of the quality score. Mo
 
 Device for SVD scoring computations. GPU is 10–50x faster than CPU.
 
+### `scoring_speed` (full / fast / turbo / turbo+, default turbo)
+
+Controls prefix subsampling during the Phase 1 heuristic sweep. Higher speed = fewer prefixes scored per candidate.
+
+| Value | Behavior | Speed |
+|-------|----------|-------|
+| `full` | Score all prefixes | Baseline |
+| `fast` | Score every 2nd prefix | ~2x faster |
+| `turbo` (default) | Score every 3rd prefix, biased toward high-conflict prefixes | ~3x faster |
+| `turbo+` | Most aggressive subsampling | ~4x faster |
+
+Ranking stays fair because all candidates are scored on the same subset. High-conflict prefixes are prioritized since they contribute most to quality differences.
+
+### `scoring_formula` (v2 / v1, default v2)
+
+Scoring formula version for ranking candidates. `v2` is the current default with improved composite scoring. `v1` is the original formula, kept for comparison.
+
 ### `record_dataset` (enabled / disabled)
 
 Saves analysis metrics and scoring results to `lora_optimizer_reports/autotuner_dataset.jsonl`. Used for threshold tuning research — not needed for normal use.
+
+---
+
+## Settings Nodes
+
+The settings architecture uses a 3-tier cascade:
+
+```
+LoRA Merge Settings → LoRA Optimizer Settings → LoRA Optimizer (settings input)
+                    → LoRA AutoTuner Settings → LoRA AutoTuner
+```
+
+### Priority Cascade
+
+1. **Connected settings node** — highest priority. Values from the settings node override built-in defaults.
+2. **Built-in defaults** — used when no settings node is connected. The LoRA Optimizer uses sensible defaults (auto_strength=enabled, optimization_mode=per_prefix, etc.).
+
+### When to Use Settings Nodes
+
+- **Never required** — the optimizer works out of the box with sensible defaults
+- **Use LoRA Merge Settings** when you want to change shared parameters (architecture preset, smoothing, VRAM budget) that apply to both optimizer and tuner workflows
+- **Use LoRA Optimizer Settings** when you want fine-grained control over merge parameters (sparsification, compression, refinement) without cluttering the main optimizer node
+- **Use LoRA AutoTuner Settings** when configuring the tuner separately (top_n, scoring options, diff cache)
+
+### Connecting Settings
+
+LoRA Merge Settings outputs `MERGE_SETTINGS`, which can be connected to either LoRA Optimizer Settings or LoRA AutoTuner Settings via their `merge_settings` input. Those settings nodes output `OPTIMIZER_SETTINGS`, which connects to the optimizer's or tuner's `settings` input.
+
+You can also use Optimizer Settings or AutoTuner Settings alone — they have sensible defaults for the shared parameters when no Merge Settings node is connected.
 
 ---
 
@@ -224,10 +291,10 @@ Use the **LoRA Optimizer** (Simple) node. Everything is handled automatically.
 |-----------|-------|
 | `auto_strength` | enabled |
 | `optimization_mode` | per_prefix |
-| `merge_quality` | enhanced |
+| `merge_refinement` | refine |
 | `sparsification` | della_conflict |
 | `sparsification_density` | 0.7 |
-| `compress_patches` | non_ties |
+| `patch_compression` | smart |
 
 ### Maximum Quality (Critical Merge)
 
@@ -235,17 +302,17 @@ Use the **LoRA Optimizer** (Simple) node. Everything is handled automatically.
 |-----------|-------|
 | `auto_strength` | enabled |
 | `optimization_mode` | per_prefix |
-| `merge_quality` | maximum |
+| `merge_refinement` | full |
 | `sparsification` | della_conflict |
 | `sparsification_density` | 0.7 |
-| `compress_patches` | non_ties |
+| `patch_compression` | smart |
 
 ### Video Models (Low Memory)
 
 | Parameter | Value |
 |-----------|-------|
 | `cache_patches` | disabled |
-| `compress_patches` | all |
+| `patch_compression` | aggressive |
 | `free_vram_between_passes` | enabled |
 | `normalize_keys` | enabled |
 | `vram_budget` | 0.0 |

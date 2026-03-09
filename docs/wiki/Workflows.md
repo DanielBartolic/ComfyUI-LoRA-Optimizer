@@ -32,6 +32,55 @@ LoRA Stack (Dynamic) ────────────┘
 
 ---
 
+## With Settings Nodes
+
+Use Settings nodes to configure the optimizer without cluttering the main node.
+
+```
+LoRA Merge Settings ──► MERGE_SETTINGS ──► LoRA Optimizer Settings ──► OPTIMIZER_SETTINGS
+                                                                              ↓
+Load Checkpoint ──► MODEL ──► LoRA Optimizer ◄────────────────────────────────┘
+                    CLIP ──►             (settings input)
+                                 ▲
+LoRA Stack ──────────────────────┘
+```
+
+Or chain all three tiers:
+
+```
+LoRA Merge Settings ──► MERGE_SETTINGS ──► LoRA AutoTuner Settings ──► OPTIMIZER_SETTINGS
+                                                                              ↓
+Load Checkpoint ──► MODEL ──► LoRA AutoTuner ◄────────────────────────────────┘
+                    CLIP ──►
+                                 ▲
+LoRA Stack ──────────────────────┘
+```
+
+**When to use:** When you want fine-grained control (sparsification, compression, smoothing) but prefer a clean main node. Also useful when sharing the same merge settings between optimizer and tuner workflows.
+
+---
+
+## Compatibility Analyzer
+
+Analyze your LoRA stack for compatibility before merging. Optionally auto-creates optimized node setups.
+
+```
+Load Checkpoint ──► MODEL ──► LoRA Compatibility Analyzer ──► report ──► Show Text
+                    CLIP ──►                               ──► compatibility_map ──► Preview Image
+                                 ▲
+LoRA Stack (Dynamic) ────────────┘
+  [LoRA A, LoRA B, LoRA C, LoRA D]
+```
+
+When `create_nodes=true` (default), the analyzer auto-creates nodes based on its grouping:
+- **Solo LoRAs** (no meaningful overlap with others) → individual **LoraLoader** nodes
+- **Merge groups** (compatible LoRAs) → **LoRA Stack (Dynamic)** nodes feeding an optimizer
+- CLIP-aware loader selection when a CLIP model is connected
+
+**When to use:** When you have many LoRAs and want to know which ones should be merged together vs loaded individually. Run the analyzer first, review the report and created nodes, then build your workflow from the suggestions.
+
+---
+
 ## With Conflict Control
 
 Manually analyze conflicts and override merge settings before optimizing.
@@ -43,7 +92,7 @@ LoRA Stack (LoRA B)
          ↓
 LoRA Stack (LoRA C)
          ↓
-LoRA Conflict Editor ──► LORA_STACK ──► LoRA Optimizer (Advanced) ──► MODEL
+LoRA Conflict Editor ──► LORA_STACK ──► LoRA Optimizer (Legacy) ──► MODEL
          │                                      ▲                 ──► CLIP
          │                                      │
          └── merge_strategy (STRING) ────────────┘
@@ -61,9 +110,9 @@ LoRA Conflict Editor ──► LORA_STACK ──► LoRA Optimizer (Advanced) �
 
 ---
 
-## AutoTuner (Find Best Config)
+## AutoTuner (Rank Configs)
 
-Let the AutoTuner sweep all parameter combinations and find the optimal merge.
+Let the AutoTuner sweep all parameter combinations and rank the strongest merges.
 
 ```
 Load Checkpoint ──► MODEL ──► LoRA AutoTuner ──► MODEL ──► KSampler
@@ -73,7 +122,7 @@ LoRA Stack ──────────────────────┘
                                              ──► LORA_DATA
 ```
 
-**When to use:** When you're not sure which settings work best, or when you want to compare different configurations objectively.
+**When to use:** When you're not sure which settings are strongest for your stack, or when you want to compare different configurations systematically.
 
 ### Trying Alternatives with Merge Selector
 
@@ -83,7 +132,35 @@ LoRA AutoTuner ──► TUNER_DATA ──► Merge Selector (selection=2) ─�
                                                                ──► LORA_DATA
 ```
 
-The AutoTuner ranks all configs by quality score. Selection 1 = best, 2 = second best, etc. Use the report to see what each config does, then switch between them with the Merge Selector.
+The AutoTuner ranks all configs by its composite score. Selection 1 = top-ranked, 2 = next-ranked, etc. Use the report to see what each config does, then switch between them with the Merge Selector.
+
+---
+
+## AutoTuner → Optimizer Bridge
+
+Use the AutoTuner to rank configs, then hand the winning settings to a downstream Legacy Optimizer for manual tweaking without rewiring the graph. This workflow requires the **LoRA Optimizer (Legacy)** node.
+
+```
+Load Checkpoint ──► MODEL ──► LoRA AutoTuner ──► MODEL ──► LoRA Optimizer (Legacy) ──► MODEL ──► KSampler
+                    CLIP ──►                 ──► CLIP  ──►                          ──► CLIP
+                                 ▲                                    ▲
+LoRA Stack ──────────────────────┘                                    │
+                     TUNER_DATA ───────────────────────────────────────┘
+```
+
+**Switch behavior** (via the Legacy optimizer's `settings_source`):
+- `settings_source = from_autotuner`
+  - AutoTuner applies the top-ranked merge.
+  - Legacy Optimizer becomes a passthrough and mirrors the winning settings in its widgets.
+- `settings_source = manual`
+  - AutoTuner passes the base model through.
+  - Legacy Optimizer takes over using its own widget settings, starting from the AutoTuner recommendation.
+- `settings_source = from_tuner_data`
+  - Legacy Optimizer reads settings from the connected `tuner_data` input.
+
+> **Note:** For new workflows, prefer using the **LoRA Optimizer** with a `tuner_data` connection from the AutoTuner instead of the bridge pattern.
+
+**When to use:** When you want the AutoTuner to narrow the search space first, then manually tweak merge quality, sparsification, or smoothing from a strong starting point.
 
 ---
 
@@ -95,7 +172,7 @@ Save the merge result as a standalone `.safetensors` file.
 LoRA Optimizer ──► LORA_DATA ──► Save Merged LoRA ──► filepath (STRING)
 ```
 
-The saved file works with any standard LoRA loader — no optimizer needed to use it. Set `bake_strength=enabled` so the saved LoRA reproduces your exact merge at strength 1.0.
+The saved file works with any standard LoRA loader — no optimizer needed to use it. Set `bake_strength=enabled` so the saved LoRA reproduces your exact merge at strength 1.0. Choose the destination with `save_folder`; `filename` is relative to that folder and may include subdirectories.
 
 **When to use:**
 - Share your merge with others
