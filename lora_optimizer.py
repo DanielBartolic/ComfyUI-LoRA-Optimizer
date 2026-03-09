@@ -8889,7 +8889,7 @@ NODE_CLASS_MAPPINGS = {
 NODE_DISPLAY_NAME_MAPPINGS = {
     "LoRAStack": "LoRA Stack",
     "LoRAStackDynamic": "LoRA Stack (Dynamic)",
-    "LoRAOptimizer": "LoRA Optimizer (Advanced)",
+    "LoRAOptimizer": "LoRA Optimizer (Legacy)",
     "LoRAOptimizerSimple": "LoRA Optimizer",
     "SaveMergedLoRA": "Save Merged LoRA",
     "BuildAutoTunerPythonEvaluator": "Build AutoTuner Python Evaluator",
