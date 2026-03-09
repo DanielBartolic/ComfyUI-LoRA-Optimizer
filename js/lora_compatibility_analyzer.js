@@ -40,6 +40,7 @@ app.registerExtension({
             const newTracked = [];
 
             let mergeGroupNum = 0;
+            let yOffset = 0;
             const loaderClass = hasClip ? "LoraLoader" : "LoraLoaderModelOnly";
 
             // Update or create nodes for each group
@@ -81,7 +82,7 @@ app.registerExtension({
                     app.graph.add(created);
                     created.pos = [
                         node.pos[0] + node.size[0] + 50,
-                        node.pos[1] + i * 250,
+                        node.pos[1] + yOffset,
                     ];
 
                     if (isLoader) {
@@ -96,6 +97,9 @@ app.registerExtension({
                     }
                     newTracked.push(created.id);
                 }
+
+                // Space nodes based on type: stacks are taller than loaders
+                yOffset += isLoader ? 150 : 300;
             }
 
             // Remove orphaned nodes (groups shrank)
