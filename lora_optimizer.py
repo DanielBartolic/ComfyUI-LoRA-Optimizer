@@ -7826,14 +7826,17 @@ class LoRACompatibilityAnalyzer(LoRAOptimizer):
     def analyze(self, enabled, create_nodes, model, lora_stack, clip=None):
         has_clip = [clip is not None]
         if not enabled:
-            return {"ui": {"groups": [], "has_clip": has_clip}, "result": ("Analysis disabled. Toggle 'enabled' to run.", self._empty_image())}
+            msg = "Analysis disabled. Toggle 'enabled' to run."
+            return {"ui": {"groups": [], "has_clip": has_clip, "text": [msg]}, "result": (msg, self._empty_image())}
         if not lora_stack or len(lora_stack) == 0:
-            return {"ui": {"groups": [], "has_clip": has_clip}, "result": ("No LoRAs in stack.", self._empty_image())}
+            msg = "No LoRAs in stack."
+            return {"ui": {"groups": [], "has_clip": has_clip, "text": [msg]}, "result": (msg, self._empty_image())}
 
         normalized_stack = self._normalize_stack(lora_stack)
         active_loras = [item for item in normalized_stack if item["strength"] != 0]
         if len(active_loras) == 0:
-            return {"ui": {"groups": [], "has_clip": has_clip}, "result": ("No active LoRAs in stack (all zero strength).", self._empty_image())}
+            msg = "No active LoRAs in stack (all zero strength)."
+            return {"ui": {"groups": [], "has_clip": has_clip, "text": [msg]}, "result": (msg, self._empty_image())}
 
         n_loras = len(active_loras)
         detected_arch = getattr(self, "_detected_arch", None) or "unknown"
@@ -7850,7 +7853,7 @@ class LoRACompatibilityAnalyzer(LoRAOptimizer):
                 "Nothing to compare — add more LoRAs to analyze compatibility.\n"
                 "\n" + "=" * 55
             )
-            return {"ui": {"groups": [], "has_clip": has_clip}, "result": (report, self._empty_image())}
+            return {"ui": {"groups": [], "has_clip": has_clip, "text": [report]}, "result": (report, self._empty_image())}
 
         logging.info(f"[Compatibility Analyzer] Analyzing {n_loras} LoRAs...")
         t_start = time.time()
@@ -7863,10 +7866,8 @@ class LoRACompatibilityAnalyzer(LoRAOptimizer):
         all_lora_prefixes = self._collect_lora_prefixes(active_loras)
         target_groups = self._build_target_groups(all_lora_prefixes, model_keys, clip_keys)
         if not target_groups:
-            return {"ui": {"groups": [], "has_clip": has_clip}, "result": (
-                "No compatible LoRA target groups found. LoRAs may be incompatible with this model architecture.",
-                self._empty_image(),
-            )}
+            msg = "No compatible LoRA target groups found. LoRAs may be incompatible with this model architecture."
+            return {"ui": {"groups": [], "has_clip": has_clip, "text": [msg]}, "result": (msg, self._empty_image())}
 
         compute_device = self._get_compute_device()
         analysis = self._run_group_analysis(
@@ -7877,10 +7878,8 @@ class LoRACompatibilityAnalyzer(LoRAOptimizer):
         )
         prefix_count = analysis["prefix_count"]
         if prefix_count == 0:
-            return {"ui": {"groups": [], "has_clip": has_clip}, "result": (
-                "No compatible LoRA target groups found. LoRAs may be incompatible with this model architecture.",
-                self._empty_image(),
-            )}
+            msg = "No compatible LoRA target groups found. LoRAs may be incompatible with this model architecture."
+            return {"ui": {"groups": [], "has_clip": has_clip, "text": [msg]}, "result": (msg, self._empty_image())}
 
         per_lora_stats = analysis["per_lora_stats"]
         pair_accum = analysis["pair_accum"]
@@ -8106,7 +8105,7 @@ class LoRACompatibilityAnalyzer(LoRAOptimizer):
                         "strength": active_loras[idx]["strength"],
                     })
 
-        return {"ui": {"groups": groups_for_ui, "has_clip": has_clip}, "result": (report, heatmap)}
+        return {"ui": {"groups": groups_for_ui, "has_clip": has_clip, "text": [report]}, "result": (report, heatmap)}
 
     @staticmethod
     def _empty_image():
