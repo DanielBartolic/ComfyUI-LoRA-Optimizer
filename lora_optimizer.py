@@ -3115,12 +3115,12 @@ def _score_config_heuristic(config, avg_conflict_ratio, avg_cos_sim,
     strat_set = config.get("strategy_set", "full")
     if opt_mode == "per_prefix":
         if is_orthogonal:
-            # Orthogonal LoRAs: SLERP upgrade doesn't help, basic is safest
-            if strat_set == "basic":
+            # Orthogonal LoRAs: SLERP preserves magnitude geometry
+            if strat_set == "full":
                 score += 0.05
             elif strat_set == "no_slerp":
-                score += 0.04
-            else:
+                score += 0.03
+            else:  # basic
                 score += 0.02
         elif effective_conflict < ties_thresh:
             # Low conflict, non-orthogonal: SLERP upgrade can help
@@ -6681,6 +6681,18 @@ class LoRAAutoTuner(LoRAOptimizer):
                 score_device=score_dev
             )
             t_score_elapsed = time.time() - t_score
+            # Discount sparsity_fit when sparsification artificially inflates it
+            if config["sparsification"] != "disabled":
+                measured["sparsity_fit"] *= 0.5
+                if measured.get("effective_rank_mean", 0) > 0:
+                    cv_s = max(0.0, 1.0 - measured["norm_cv"])
+                    measured["composite_score"] = (
+                        min(measured["effective_rank_mean"] / 40.0, 1.0) * 0.4
+                        + cv_s * 0.3 + measured["sparsity_fit"] * 0.3
+                    )
+                else:
+                    cv_s = max(0.0, 1.0 - measured["norm_cv"])
+                    measured["composite_score"] = cv_s * 0.5 + measured["sparsity_fit"] * 0.5
             external_eval = _run_autotuner_evaluator(
                 evaluator, merged_model, merged_clip, lora_data, config, analysis_summary
             ) if evaluator else None
