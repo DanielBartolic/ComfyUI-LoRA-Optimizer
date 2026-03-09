@@ -29,6 +29,7 @@ app.registerExtension({
 
         const origOnExecuted = node.onExecuted;
         node.onExecuted = function (message) {
+            // Let ComfyUI handle ui.text and ui.images display first
             if (origOnExecuted) origOnExecuted.call(this, message);
 
             const groups = message?.groups;
