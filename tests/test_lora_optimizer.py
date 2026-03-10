@@ -674,5 +674,70 @@ class LoRASettingsNodeTests(unittest.TestCase):
                          "_DEFAULTS keys don't match INPUT_TYPES keys")
 
 
+    # --- Merge formula parser tests ---
+
+    def test_parse_merge_formula_simple(self):
+        """Simple flat formula parses to group of leaves."""
+        tree = lora_optimizer._parse_merge_formula("1 + 2 + 3", 3)
+        self.assertEqual(tree["type"], "group")
+        self.assertEqual(len(tree["children"]), 3)
+        for i, child in enumerate(tree["children"]):
+            self.assertEqual(child["type"], "leaf")
+            self.assertEqual(child["index"], i)
+
+    def test_parse_merge_formula_nested(self):
+        """Nested formula parses to tree with sub-group."""
+        tree = lora_optimizer._parse_merge_formula("(1+2) + 3", 3)
+        self.assertEqual(tree["type"], "group")
+        self.assertEqual(len(tree["children"]), 2)
+        sub = tree["children"][0]
+        self.assertEqual(sub["type"], "group")
+        self.assertEqual(len(sub["children"]), 2)
+        leaf3 = tree["children"][1]
+        self.assertEqual(leaf3["type"], "leaf")
+        self.assertEqual(leaf3["index"], 2)
+
+    def test_parse_merge_formula_weights(self):
+        """Weights are parsed from :N.N suffix."""
+        tree = lora_optimizer._parse_merge_formula("(1+2):0.6 + 3:0.4", 3)
+        self.assertAlmostEqual(tree["children"][0]["weight"], 0.6)
+        self.assertAlmostEqual(tree["children"][1]["weight"], 0.4)
+
+    def test_parse_merge_formula_deep_nesting(self):
+        """Deep nesting: ((1+2)+3) + 4."""
+        tree = lora_optimizer._parse_merge_formula("((1+2)+3) + 4", 4)
+        self.assertEqual(tree["type"], "group")
+        self.assertEqual(len(tree["children"]), 2)
+        inner = tree["children"][0]
+        self.assertEqual(inner["type"], "group")
+        self.assertEqual(len(inner["children"]), 2)
+        innermost = inner["children"][0]
+        self.assertEqual(innermost["type"], "group")
+        self.assertEqual(len(innermost["children"]), 2)
+
+    def test_parse_merge_formula_single_item(self):
+        """Single item is valid."""
+        tree = lora_optimizer._parse_merge_formula("1", 1)
+        self.assertEqual(tree["type"], "leaf")
+        self.assertEqual(tree["index"], 0)
+
+    def test_parse_merge_formula_out_of_range(self):
+        """Out of range index raises ValueError."""
+        with self.assertRaises(ValueError):
+            lora_optimizer._parse_merge_formula("1 + 5", 3)
+
+    def test_parse_merge_formula_malformed(self):
+        """Malformed formula raises ValueError."""
+        with self.assertRaises(ValueError):
+            lora_optimizer._parse_merge_formula("((1+2", 3)
+
+    def test_parse_merge_formula_empty(self):
+        """Empty/whitespace formula raises ValueError."""
+        with self.assertRaises(ValueError):
+            lora_optimizer._parse_merge_formula("", 3)
+        with self.assertRaises(ValueError):
+            lora_optimizer._parse_merge_formula("   ", 3)
+
+
 if __name__ == "__main__":
     unittest.main()

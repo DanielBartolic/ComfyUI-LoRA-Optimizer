@@ -166,6 +166,93 @@ def _resolve_arch_preset(arch_override, detected_arch):
     return key, _ARCH_PRESETS[key]
 
 
+def _parse_merge_formula(formula_str, n_loras):
+    """
+    Parse a merge formula string into a tree structure.
+
+    Syntax:
+        expr   = term (('+') term)*
+        term   = atom (':' weight)?
+        atom   = NUMBER | '(' expr ')'
+        weight = FLOAT
+
+    Numbers are 1-indexed LoRA positions. Returns a tree of:
+        {"type": "leaf", "index": int, "weight": float|None}
+        {"type": "group", "children": list, "weight": float|None}
+
+    Raises ValueError on malformed input or out-of-range indices.
+    """
+    formula_str = formula_str.strip()
+    if not formula_str:
+        raise ValueError("Empty merge formula")
+
+    pos = [0]  # mutable position cursor
+
+    def _skip_ws():
+        while pos[0] < len(formula_str) and formula_str[pos[0]] == ' ':
+            pos[0] += 1
+
+    def _parse_weight():
+        _skip_ws()
+        if pos[0] < len(formula_str) and formula_str[pos[0]] == ':':
+            pos[0] += 1  # skip ':'
+            _skip_ws()
+            start = pos[0]
+            while pos[0] < len(formula_str) and (formula_str[pos[0]].isdigit() or formula_str[pos[0]] == '.'):
+                pos[0] += 1
+            if pos[0] == start:
+                raise ValueError(f"Expected weight after ':' at position {pos[0]}")
+            return float(formula_str[start:pos[0]])
+        return None
+
+    def _parse_atom():
+        _skip_ws()
+        if pos[0] >= len(formula_str):
+            raise ValueError("Unexpected end of formula")
+
+        if formula_str[pos[0]] == '(':
+            pos[0] += 1  # skip '('
+            node = _parse_expr()
+            _skip_ws()
+            if pos[0] >= len(formula_str) or formula_str[pos[0]] != ')':
+                raise ValueError(f"Expected ')' at position {pos[0]}")
+            pos[0] += 1  # skip ')'
+            weight = _parse_weight()
+            node["weight"] = weight
+            return node
+
+        # Must be a number
+        start = pos[0]
+        while pos[0] < len(formula_str) and formula_str[pos[0]].isdigit():
+            pos[0] += 1
+        if pos[0] == start:
+            raise ValueError(f"Unexpected character '{formula_str[pos[0]]}' at position {pos[0]}")
+        index_1based = int(formula_str[start:pos[0]])
+        if index_1based < 1 or index_1based > n_loras:
+            raise ValueError(f"LoRA index {index_1based} out of range (have {n_loras} LoRAs)")
+        weight = _parse_weight()
+        return {"type": "leaf", "index": index_1based - 1, "weight": weight}
+
+    def _parse_expr():
+        children = [_parse_atom()]
+        while True:
+            _skip_ws()
+            if pos[0] < len(formula_str) and formula_str[pos[0]] == '+':
+                pos[0] += 1  # skip '+'
+                children.append(_parse_atom())
+            else:
+                break
+        if len(children) == 1:
+            return children[0]
+        return {"type": "group", "children": children, "weight": None}
+
+    result = _parse_expr()
+    _skip_ws()
+    if pos[0] != len(formula_str):
+        raise ValueError(f"Unexpected content at position {pos[0]}: '{formula_str[pos[0]:]}'")
+    return result
+
+
 class LoRAStack:
     """
     Node for creating a LoRA stack (input format for LoRAOptimizer).
