@@ -1285,6 +1285,15 @@ class _LoRAMergeBase:
             "_lora.up.weight", "_lora.down.weight",
             ".lora_B.weight", ".lora_A.weight",
             ".lora.up.weight", ".lora.down.weight",
+            # LoKr (Kronecker)
+            ".lokr_w1", ".lokr_w2",
+            ".lokr_w1_a", ".lokr_w1_b",
+            ".lokr_w2_a", ".lokr_w2_b",
+            ".lokr_t2",
+            # LoHa (Hadamard)
+            ".hada_w1_a", ".hada_w1_b",
+            ".hada_w2_a", ".hada_w2_b",
+            ".hada_t1", ".hada_t2",
             ".alpha",
         ]
         for item in active_loras:
@@ -1451,33 +1460,58 @@ class _LoRAMergeBase:
             diff_accum = None
             rank_sum = 0
             for alias in target_group["aliases"]:
-                lora_info = self._get_lora_key_info(item["lora"], alias)
-                if lora_info is None:
-                    continue
-
-                mat_up, mat_down, alpha, mid = lora_info
-                rank_sum += mat_down.shape[0]
-                raw_contributors.add(i)
-                if storage_dtype is None:
-                    storage_dtype = mat_up.dtype
-
                 cache_key = (alias, i)
                 if diff_cache is not None and cache_key in diff_cache:
                     diff = diff_cache.get(cache_key, device=device if use_gpu else None)
                     if diff is not None:
                         diff = diff.float()
-                else:
+                        raw_contributors.add(i)
+                        rank_sum += 1  # rank unknown from cache
+                        diff_accum = diff if diff_accum is None else diff_accum + diff
+                    continue
+
+                lora_info = self._get_lora_key_info(item["lora"], alias)
+                if lora_info is not None:
+                    mat_up, mat_down, alpha, mid = lora_info
+                    rank_sum += mat_down.shape[0]
+                    raw_contributors.add(i)
+                    if storage_dtype is None:
+                        storage_dtype = mat_up.dtype
                     diff = self._compute_lora_diff(
                         mat_up, mat_down, alpha, mid, target_shape,
                         device=device if use_gpu else None,
                         to_cpu=not use_gpu,
                     )
-                    if diff_cache is not None and diff is not None:
-                        diff_cache.put(cache_key, diff)
-                    if diff is not None:
-                        diff = diff.float()
+                else:
+                    # Try LoKr / LoHa formats
+                    alt = self._get_lokr_diff(
+                        item["lora"], alias,
+                        device=device if use_gpu else None, to_cpu=not use_gpu,
+                    )
+                    if alt is None:
+                        alt = self._get_loha_diff(
+                            item["lora"], alias,
+                            device=device if use_gpu else None, to_cpu=not use_gpu,
+                        )
+                    if alt is not None:
+                        diff, alt_rank, alt_dtype = alt
+                        try:
+                            diff = diff.reshape(target_shape)
+                        except RuntimeError:
+                            diff = None
+                        if diff is not None:
+                            rank_sum += alt_rank
+                            raw_contributors.add(i)
+                            if storage_dtype is None:
+                                storage_dtype = alt_dtype
+                    else:
+                        diff = None
 
-                if diff is None:
+                if diff is not None:
+                    if diff_cache is not None:
+                        diff_cache.put(cache_key, diff)
+                    diff = diff.float()
+                else:
                     skip_count += 1
                     continue
                 diff_accum = diff if diff_accum is None else diff_accum + diff
@@ -1552,7 +1586,7 @@ class _LoRAMergeBase:
     def _get_lora_key_info(self, lora_dict, key_prefix):
         """
         Extracts LoRA information for the given key.
-        Returns (mat_up, mat_down, alpha, mid) or None.
+        Returns (mat_up, mat_down, alpha, mid) or None for standard LoRA.
         """
         # LoRA key formats
         formats = [
@@ -1561,15 +1595,15 @@ class _LoRAMergeBase:
             ("{}.lora_B.weight", "{}.lora_A.weight"),               # diffusers2
             ("{}.lora.up.weight", "{}.lora.down.weight"),           # diffusers3
         ]
-        
+
         for up_fmt, down_fmt in formats:
             up_key = up_fmt.format(key_prefix)
             down_key = down_fmt.format(key_prefix)
-            
+
             if up_key in lora_dict and down_key in lora_dict:
                 mat_up = lora_dict[up_key]
                 mat_down = lora_dict[down_key]
-                
+
                 # Alpha
                 alpha_key = "{}.alpha".format(key_prefix)
                 alpha = lora_dict.get(alpha_key, None)
@@ -1577,14 +1611,143 @@ class _LoRAMergeBase:
                     alpha = alpha.item()
                 else:
                     alpha = mat_down.shape[0]  # rank as default
-                
+
                 # Mid (for LoCon)
                 mid_key = "{}.lora_mid.weight".format(key_prefix)
                 mid = lora_dict.get(mid_key, None)
-                
+
                 return (mat_up, mat_down, alpha, mid)
-        
+
         return None
+
+    @staticmethod
+    def _has_lokr_keys(lora_dict, key_prefix):
+        """Check if lora_dict has LoKr keys for the given prefix (no tensor loading)."""
+        p = key_prefix
+        has_w1 = f"{p}.lokr_w1" in lora_dict or (f"{p}.lokr_w1_a" in lora_dict and f"{p}.lokr_w1_b" in lora_dict)
+        has_w2 = f"{p}.lokr_w2" in lora_dict or (f"{p}.lokr_w2_a" in lora_dict and f"{p}.lokr_w2_b" in lora_dict)
+        return has_w1 and has_w2
+
+    @staticmethod
+    def _has_loha_keys(lora_dict, key_prefix):
+        """Check if lora_dict has LoHa keys for the given prefix (no tensor loading)."""
+        p = key_prefix
+        return (f"{p}.hada_w1_a" in lora_dict and f"{p}.hada_w1_b" in lora_dict
+                and f"{p}.hada_w2_a" in lora_dict and f"{p}.hada_w2_b" in lora_dict)
+
+    def _get_lokr_diff(self, lora_dict, key_prefix, device=None, to_cpu=True):
+        """
+        Extract LoKr (Kronecker) factors and compute full diff.
+        Returns (diff, rank, dtype) or None.
+        """
+        p = key_prefix
+        w1 = lora_dict.get(f"{p}.lokr_w1")
+        w2 = lora_dict.get(f"{p}.lokr_w2")
+        w1_a = lora_dict.get(f"{p}.lokr_w1_a")
+        w1_b = lora_dict.get(f"{p}.lokr_w1_b")
+        w2_a = lora_dict.get(f"{p}.lokr_w2_a")
+        w2_b = lora_dict.get(f"{p}.lokr_w2_b")
+        t2 = lora_dict.get(f"{p}.lokr_t2")
+
+        has_w1 = w1 is not None or (w1_a is not None and w1_b is not None)
+        has_w2 = w2 is not None or (w2_a is not None and w2_b is not None)
+        if not (has_w1 and has_w2):
+            return None
+
+        alpha = lora_dict.get(f"{p}.alpha")
+        if alpha is not None:
+            alpha = alpha.item()
+
+        dim = None
+        ref_tensor = w1 if w1 is not None else (w1_a if w1_a is not None else w2_a)
+        dtype = ref_tensor.dtype
+
+        if device is not None:
+            w1 = w1.to(device) if w1 is not None else None
+            w2 = w2.to(device) if w2 is not None else None
+            w1_a = w1_a.to(device) if w1_a is not None else None
+            w1_b = w1_b.to(device) if w1_b is not None else None
+            w2_a = w2_a.to(device) if w2_a is not None else None
+            w2_b = w2_b.to(device) if w2_b is not None else None
+            t2 = t2.to(device) if t2 is not None else None
+
+        if w1 is None:
+            dim = w1_b.shape[0]
+            w1 = torch.mm(w1_a.float(), w1_b.float())
+        else:
+            w1 = w1.float()
+        if w2 is None:
+            dim = w2_b.shape[0]
+            if t2 is None:
+                w2 = torch.mm(w2_a.float(), w2_b.float())
+            else:
+                w2 = torch.einsum(
+                    "i j k l, j r, i p -> p r k l",
+                    t2.float(), w2_b.float(), w2_a.float(),
+                )
+        else:
+            w2 = w2.float()
+
+        if len(w2.shape) == 4:
+            w1 = w1.unsqueeze(2).unsqueeze(2)
+
+        scale = alpha / dim if (alpha is not None and dim is not None) else 1.0
+        diff = torch.kron(w1, w2) * scale
+        rank = dim if dim is not None else min(w1.shape)
+
+        if to_cpu and diff.device.type != "cpu":
+            diff = diff.cpu()
+        return (diff, rank, dtype)
+
+    def _get_loha_diff(self, lora_dict, key_prefix, device=None, to_cpu=True):
+        """
+        Extract LoHa (Hadamard) factors and compute full diff.
+        Returns (diff, rank, dtype) or None.
+        """
+        p = key_prefix
+        w1a = lora_dict.get(f"{p}.hada_w1_a")
+        w1b = lora_dict.get(f"{p}.hada_w1_b")
+        w2a = lora_dict.get(f"{p}.hada_w2_a")
+        w2b = lora_dict.get(f"{p}.hada_w2_b")
+        if w1a is None or w1b is None or w2a is None or w2b is None:
+            return None
+
+        t1 = lora_dict.get(f"{p}.hada_t1")
+        t2 = lora_dict.get(f"{p}.hada_t2")
+        alpha = lora_dict.get(f"{p}.alpha")
+        if alpha is not None:
+            alpha = alpha.item()
+
+        dtype = w1a.dtype
+        rank = w1b.shape[0]
+
+        if device is not None:
+            w1a = w1a.to(device)
+            w1b = w1b.to(device)
+            w2a = w2a.to(device)
+            w2b = w2b.to(device)
+            t1 = t1.to(device) if t1 is not None else None
+            t2 = t2.to(device) if t2 is not None else None
+
+        if t1 is not None:
+            m1 = torch.einsum(
+                "i j k l, j r, i p -> p r k l",
+                t1.float(), w1b.float(), w1a.float(),
+            )
+            m2 = torch.einsum(
+                "i j k l, j r, i p -> p r k l",
+                t2.float(), w2b.float(), w2a.float(),
+            )
+        else:
+            m1 = torch.mm(w1a.float(), w1b.float())
+            m2 = torch.mm(w2a.float(), w2b.float())
+
+        scale = alpha / rank if alpha is not None else 1.0
+        diff = (m1 * m2) * scale
+
+        if to_cpu and diff.device.type != "cpu":
+            diff = diff.cpu()
+        return (diff, rank, dtype)
     
     def _compute_lora_diff(self, mat_up, mat_down, alpha, mid, target_shape, device=None, to_cpu=True):
         """
@@ -3708,12 +3871,24 @@ class LoRAOptimizer(_LoRAMergeBase):
         skip_count = 0
         for i, item in enumerate(active_loras):
             lora_info = self._get_lora_key_info(item["lora"], lora_prefix)
-            if lora_info is None:
-                continue
-
-            mat_up, mat_down, alpha, mid = lora_info
-            rank = mat_down.shape[0]
-            diff = self._compute_lora_diff(mat_up, mat_down, alpha, mid, target_shape, device=device)
+            if lora_info is not None:
+                mat_up, mat_down, alpha, mid = lora_info
+                rank = mat_down.shape[0]
+                diff = self._compute_lora_diff(mat_up, mat_down, alpha, mid, target_shape, device=device)
+            else:
+                # Try LoKr / LoHa formats
+                alt = self._get_lokr_diff(item["lora"], lora_prefix, device=device)
+                if alt is None:
+                    alt = self._get_loha_diff(item["lora"], lora_prefix, device=device)
+                if alt is not None:
+                    diff, rank, _ = alt
+                    try:
+                        diff = diff.reshape(target_shape)
+                    except RuntimeError:
+                        diff = None
+                        rank = 0
+                else:
+                    continue
 
             if diff is not None:
                 # For CLIP keys, use per-LoRA clip_strength when available
@@ -3804,43 +3979,60 @@ class LoRAOptimizer(_LoRAMergeBase):
 
         for i, item in enumerate(active_loras):
             lora_info = self._get_lora_key_info(item["lora"], lora_prefix)
-            if lora_info is None:
-                continue
+            if lora_info is not None:
+                mat_up, mat_down, alpha, mid = lora_info
+                rank = mat_down.shape[0]
 
-            mat_up, mat_down, alpha, mid = lora_info
-            rank = mat_down.shape[0]
+                # Compute diff on GPU but DON'T copy back to CPU yet
+                if use_gpu:
+                    mat_up = mat_up.to(device)
+                    mat_down = mat_down.to(device)
+                    if mid is not None:
+                        mid = mid.to(device)
+                scale = alpha / rank
 
-            # Compute diff on GPU but DON'T copy back to CPU yet
-            if use_gpu:
-                mat_up = mat_up.to(device)
-                mat_down = mat_down.to(device)
                 if mid is not None:
-                    mid = mid.to(device)
-            scale = alpha / rank
-
-            if mid is not None:
-                final_shape = [mat_down.shape[1], mat_down.shape[0], mid.shape[2], mid.shape[3]]
-                mat_down = (
-                    torch.mm(
-                        mat_down.transpose(0, 1).flatten(start_dim=1).float(),
-                        mid.transpose(0, 1).flatten(start_dim=1).float(),
+                    final_shape = [mat_down.shape[1], mat_down.shape[0], mid.shape[2], mid.shape[3]]
+                    mat_down = (
+                        torch.mm(
+                            mat_down.transpose(0, 1).flatten(start_dim=1).float(),
+                            mid.transpose(0, 1).flatten(start_dim=1).float(),
+                        )
+                        .reshape(final_shape)
+                        .transpose(0, 1)
                     )
-                    .reshape(final_shape)
-                    .transpose(0, 1)
+
+                diff = torch.mm(
+                    mat_up.flatten(start_dim=1).float(),
+                    mat_down.flatten(start_dim=1).float()
                 )
+                del mat_up, mat_down  # Free LoRA matrices from GPU
+                try:
+                    diff = diff.reshape(target_shape)
+                except RuntimeError:
+                    skip_count += 1
+                    continue
 
-            diff = torch.mm(
-                mat_up.flatten(start_dim=1).float(),
-                mat_down.flatten(start_dim=1).float()
-            )
-            del mat_up, mat_down  # Free LoRA matrices from GPU
-            try:
-                diff = diff.reshape(target_shape)
-            except RuntimeError:
-                skip_count += 1
-                continue
-
-            diff = diff * scale
+                diff = diff * scale
+            else:
+                # Try LoKr / LoHa formats
+                alt = self._get_lokr_diff(
+                    item["lora"], lora_prefix,
+                    device=device if use_gpu else None, to_cpu=False,
+                )
+                if alt is None:
+                    alt = self._get_loha_diff(
+                        item["lora"], lora_prefix,
+                        device=device if use_gpu else None, to_cpu=False,
+                    )
+                if alt is None:
+                    continue
+                diff, rank, _ = alt
+                try:
+                    diff = diff.reshape(target_shape)
+                except RuntimeError:
+                    skip_count += 1
+                    continue
 
             if is_clip and item["clip_strength"] is not None:
                 eff_strength = item["clip_strength"]
@@ -4381,6 +4573,10 @@ class LoRAOptimizer(_LoRAMergeBase):
             for alias in target_group["aliases"]:
                 lora_info = self._get_lora_key_info(item["lora"], alias)
                 if lora_info is None:
+                    # Check if this alias has LoKr/LoHa keys — can't represent
+                    # as low-rank factors, fall through to dense diff path
+                    if self._has_lokr_keys(item["lora"], alias) or self._has_loha_keys(item["lora"], alias):
+                        return None
                     continue
                 mat_up, mat_down, alpha, mid = lora_info
                 if mid is not None:
@@ -8713,6 +8909,15 @@ class LoRAConflictEditor(_LoRAMergeBase):
             ".lora_A.weight", ".lora_B.weight",
             ".lora.up.weight", ".lora.down.weight",
             "_lora.up.weight", "_lora.down.weight",
+            # LoKr (Kronecker)
+            ".lokr_w1", ".lokr_w2",
+            ".lokr_w1_a", ".lokr_w1_b",
+            ".lokr_w2_a", ".lokr_w2_b",
+            ".lokr_t2",
+            # LoHa (Hadamard)
+            ".hada_w1_a", ".hada_w1_b",
+            ".hada_w2_a", ".hada_w2_b",
+            ".hada_t1", ".hada_t2",
         ]
         for item in active_loras:
             for key in item["lora"].keys():
@@ -8739,36 +8944,51 @@ class LoRAConflictEditor(_LoRAMergeBase):
             diffs = {}
             for idx, item in enumerate(active_loras):
                 info = self._get_lora_key_info(item["lora"], prefix)
-                if info is None:
-                    continue
-                mat_up, mat_down, alpha, mid = info
-                rank = mat_down.shape[0]
-                scale = alpha / rank
+                if info is not None:
+                    mat_up, mat_down, alpha, mid = info
+                    rank = mat_down.shape[0]
+                    scale = alpha / rank
 
-                if compute_device.type != "cpu":
-                    mat_up = mat_up.to(compute_device)
-                    mat_down = mat_down.to(compute_device)
+                    if compute_device.type != "cpu":
+                        mat_up = mat_up.to(compute_device)
+                        mat_down = mat_down.to(compute_device)
+                        if mid is not None:
+                            mid = mid.to(compute_device)
+
                     if mid is not None:
-                        mid = mid.to(compute_device)
-
-                if mid is not None:
-                    final_shape = [mat_down.shape[1], mat_down.shape[0], mid.shape[2], mid.shape[3]]
-                    mat_down = (
-                        torch.mm(
-                            mat_down.transpose(0, 1).flatten(start_dim=1).float(),
-                            mid.transpose(0, 1).flatten(start_dim=1).float(),
+                        final_shape = [mat_down.shape[1], mat_down.shape[0], mid.shape[2], mid.shape[3]]
+                        mat_down = (
+                            torch.mm(
+                                mat_down.transpose(0, 1).flatten(start_dim=1).float(),
+                                mid.transpose(0, 1).flatten(start_dim=1).float(),
+                            )
+                            .reshape(final_shape)
+                            .transpose(0, 1)
                         )
-                        .reshape(final_shape)
-                        .transpose(0, 1)
-                    )
 
-                diff = torch.mm(
-                    mat_up.flatten(start_dim=1).float(),
-                    mat_down.flatten(start_dim=1).float()
-                )
-                del mat_up, mat_down
-                diff = diff * scale * item["strength"]
-                diffs[idx] = diff
+                    diff = torch.mm(
+                        mat_up.flatten(start_dim=1).float(),
+                        mat_down.flatten(start_dim=1).float()
+                    )
+                    del mat_up, mat_down
+                    diff = diff * scale * item["strength"]
+                    diffs[idx] = diff
+                else:
+                    # Try LoKr / LoHa formats
+                    use_gpu = compute_device.type != "cpu"
+                    alt = self._get_lokr_diff(
+                        item["lora"], prefix,
+                        device=compute_device if use_gpu else None, to_cpu=False,
+                    )
+                    if alt is None:
+                        alt = self._get_loha_diff(
+                            item["lora"], prefix,
+                            device=compute_device if use_gpu else None, to_cpu=False,
+                        )
+                    if alt is not None:
+                        diff, _, _ = alt
+                        diff = diff.float() * item["strength"]
+                        diffs[idx] = diff
 
             if len(diffs) < 2:
                 continue
