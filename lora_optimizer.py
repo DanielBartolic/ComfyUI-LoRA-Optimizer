@@ -6386,13 +6386,20 @@ class LoRAOptimizer(_LoRAMergeBase):
         Each sub-group is a full optimize_merge call.
         Returns the same 5-tuple as optimize_merge.
         """
+        # Save _detected_arch — sub-merges may overwrite it (e.g. all-virtual stacks)
+        saved_arch = getattr(self, '_detected_arch', None)
+
         # Collect the final flat stack by recursively resolving groups
         final_stack, sub_reports = self._resolve_tree_to_stack(
             tree, normalized_stack, model, clip, **kwargs)
 
+        # Restore _detected_arch for the final merge
+        self._detected_arch = saved_arch
+
         # Final merge: restore original cache_patches setting (sub-merges use "disabled")
         final_kwargs = dict(kwargs)
         final_kwargs["cache_patches"] = _orig_cache_patches
+        final_kwargs["_skip_qkv_refusion"] = False  # final merge must re-fuse QKV for Z-Image
         result = self.optimize_merge(model, final_stack, output_strength, clip=clip, **final_kwargs)
 
         # Prepend sub-reports to the final report
