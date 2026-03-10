@@ -526,6 +526,145 @@ class LoRAOptimizerTests(unittest.TestCase):
         self.assertEqual(resolved_stack[1]["name"], "lora_c")
         self.assertEqual(len(sub_reports), 1)
 
+    def test_autotune_resolve_tree_passes_sub_merge_flags(self):
+        """Sub-merge auto_tune calls should include _is_sub_merge and _suppress_pbar."""
+        from lora_optimizer import LoRAAutoTuner, _parse_merge_formula
+
+        tuner = LoRAAutoTuner()
+        tree = _parse_merge_formula("(1+2)+3", 3)
+
+        fake_lora_a = {"key_a": torch.randn(4, 4)}
+        fake_lora_b = {"key_a": torch.randn(4, 4)}
+        fake_lora_c = {"key_c": torch.randn(4, 4)}
+        normalized_stack = [
+            {"name": "lora_a", "lora": fake_lora_a, "strength": 1.0,
+             "clip_strength": None, "metadata": {}},
+            {"name": "lora_b", "lora": fake_lora_b, "strength": 1.0,
+             "clip_strength": None, "metadata": {}},
+            {"name": "lora_c", "lora": fake_lora_c, "strength": 1.0,
+             "clip_strength": None, "metadata": {}},
+        ]
+
+        calls = []
+        def mock_auto_tune(model, lora_stack, output_strength, **kwargs):
+            calls.append(kwargs)
+            virtual_patches = {"key_a": ("diff", (torch.randn(4, 4),))}
+            lora_data = {"model_patches": virtual_patches, "clip_patches": {}}
+            return (model, None, "sub-report", "", None, lora_data)
+
+        tuner.auto_tune = mock_auto_tune
+
+        at_kwargs = {
+            "clip_strength_multiplier": 1.0,
+            "top_n": 3, "normalize_keys": "disabled", "scoring_svd": "disabled",
+            "scoring_device": "cpu", "architecture_preset": "dit",
+            "auto_strength_floor": -1.0, "decision_smoothing": 0.25,
+            "smooth_slerp_gate": False, "vram_budget": 0.0,
+            "scoring_speed": "turbo", "scoring_formula": "v2",
+            "diff_cache_mode": "disabled", "diff_cache_ram_pct": 0.5,
+        }
+
+        tuner._autotune_resolve_tree(tree, normalized_stack, None, None, **at_kwargs)
+
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(calls[0].get("_is_sub_merge", False))
+        self.assertTrue(calls[0].get("_suppress_pbar", False))
+        self.assertEqual(calls[0].get("cache_patches"), "disabled")
+        self.assertEqual(calls[0].get("record_dataset"), "disabled")
+        self.assertEqual(calls[0].get("output_mode"), "merge")
+
+    def test_autotune_resolve_tree_single_item_passthrough(self):
+        """Single-item sub-groups should pass through without calling auto_tune."""
+        from lora_optimizer import LoRAAutoTuner, _parse_merge_formula
+
+        tuner = LoRAAutoTuner()
+        tree = _parse_merge_formula("(1)+2", 2)
+
+        fake_lora_a = {"key_a": torch.randn(4, 4)}
+        fake_lora_b = {"key_b": torch.randn(4, 4)}
+        normalized_stack = [
+            {"name": "lora_a", "lora": fake_lora_a, "strength": 1.0,
+             "clip_strength": None, "metadata": {}},
+            {"name": "lora_b", "lora": fake_lora_b, "strength": 1.0,
+             "clip_strength": None, "metadata": {}},
+        ]
+
+        calls = []
+        def mock_auto_tune(model, lora_stack, output_strength, **kwargs):
+            calls.append(True)
+            return (model, None, "", "", None, None)
+
+        tuner.auto_tune = mock_auto_tune
+
+        at_kwargs = {
+            "clip_strength_multiplier": 1.0,
+            "top_n": 3, "normalize_keys": "disabled", "scoring_svd": "disabled",
+            "scoring_device": "cpu", "architecture_preset": "dit",
+            "auto_strength_floor": -1.0, "decision_smoothing": 0.25,
+            "smooth_slerp_gate": False, "vram_budget": 0.0,
+            "scoring_speed": "turbo", "scoring_formula": "v2",
+            "diff_cache_mode": "disabled", "diff_cache_ram_pct": 0.5,
+        }
+
+        resolved_stack, sub_reports = tuner._autotune_resolve_tree(
+            tree, normalized_stack, None, None, **at_kwargs)
+
+        self.assertEqual(len(calls), 0)
+        self.assertEqual(len(resolved_stack), 2)
+        self.assertEqual(resolved_stack[0]["name"], "lora_a")
+        self.assertEqual(resolved_stack[1]["name"], "lora_b")
+
+    def test_autotune_resolve_tree_nested_groups(self):
+        """Nested formula ((1+2)+3)+4 should resolve innermost first."""
+        from lora_optimizer import LoRAAutoTuner, _parse_merge_formula
+
+        tuner = LoRAAutoTuner()
+        tree = _parse_merge_formula("((1+2)+3)+4", 4)
+
+        normalized_stack = []
+        for i in range(4):
+            normalized_stack.append({
+                "name": f"lora_{i}", "lora": {f"key_{i}": torch.randn(4, 4)},
+                "strength": 1.0, "clip_strength": None, "metadata": {},
+            })
+
+        call_order = []
+        def mock_auto_tune(model, lora_stack, output_strength, **kwargs):
+            names = [l["name"] for l in lora_stack if not l.get("_precomputed_diffs")]
+            virtual_count = sum(1 for l in lora_stack if l.get("_precomputed_diffs"))
+            call_order.append({"names": names, "virtual_count": virtual_count,
+                               "total": len(lora_stack)})
+            virtual_patches = {f"key_v{len(call_order)}": ("diff", (torch.randn(4, 4),))}
+            lora_data = {"model_patches": virtual_patches, "clip_patches": {}}
+            return (model, None, f"sub-report-{len(call_order)}", "", None, lora_data)
+
+        tuner.auto_tune = mock_auto_tune
+
+        at_kwargs = {
+            "clip_strength_multiplier": 1.0,
+            "top_n": 3, "normalize_keys": "disabled", "scoring_svd": "disabled",
+            "scoring_device": "cpu", "architecture_preset": "dit",
+            "auto_strength_floor": -1.0, "decision_smoothing": 0.25,
+            "smooth_slerp_gate": False, "vram_budget": 0.0,
+            "scoring_speed": "turbo", "scoring_formula": "v2",
+            "diff_cache_mode": "disabled", "diff_cache_ram_pct": 0.5,
+        }
+
+        resolved_stack, sub_reports = tuner._autotune_resolve_tree(
+            tree, normalized_stack, None, None, **at_kwargs)
+
+        # Two auto_tune calls: (1+2) first, then (virtual+3)
+        self.assertEqual(len(call_order), 2)
+        self.assertEqual(call_order[0]["names"], ["lora_0", "lora_1"])
+        self.assertEqual(call_order[0]["virtual_count"], 0)
+        self.assertEqual(call_order[1]["total"], 2)
+        self.assertEqual(call_order[1]["virtual_count"], 1)
+
+        # Final stack: virtual from ((1+2)+3) + lora_3
+        self.assertEqual(len(resolved_stack), 2)
+        self.assertTrue(resolved_stack[0].get("_precomputed_diffs"))
+        self.assertEqual(resolved_stack[1]["name"], "lora_3")
+
     def test_auto_tune_with_formula_calls_autotune_resolve_tree(self):
         """auto_tune should detect formula and use _autotune_resolve_tree."""
         tuner = lora_optimizer.LoRAAutoTuner()
