@@ -5470,7 +5470,7 @@ class LoRAOptimizer(_LoRAMergeBase):
             decision_smoothing=decision_smoothing,
         )
 
-    def optimize_merge(self, model, lora_stack, output_strength, clip=None, clip_strength_multiplier=1.0, auto_strength="disabled", auto_strength_floor=-1.0, free_vram_between_passes="disabled", vram_budget=0.0, optimization_mode="per_prefix", cache_patches="enabled", patch_compression="smart", svd_device="gpu", normalize_keys="disabled", sparsification="disabled", sparsification_density=0.7, dare_dampening=0.0, merge_strategy_override="", merge_refinement="none", strategy_set="full", architecture_preset="auto", decision_smoothing=0.25, smooth_slerp_gate=False, _analysis_cache=None, _diff_cache=None, _skip_report=False):
+    def optimize_merge(self, model, lora_stack, output_strength, clip=None, clip_strength_multiplier=1.0, auto_strength="disabled", auto_strength_floor=-1.0, free_vram_between_passes="disabled", vram_budget=0.0, optimization_mode="per_prefix", cache_patches="enabled", patch_compression="smart", svd_device="gpu", normalize_keys="disabled", sparsification="disabled", sparsification_density=0.7, dare_dampening=0.0, merge_strategy_override="", merge_refinement="none", strategy_set="full", architecture_preset="auto", decision_smoothing=0.25, smooth_slerp_gate=False, _analysis_cache=None, _diff_cache=None, _skip_report=False, _skip_qkv_refusion=False):
         """
         Main entry point. Two-pass streaming architecture:
         Pass 1: Resolve aliases to target groups, compute diffs, sample metrics, discard diffs
@@ -5553,6 +5553,7 @@ class LoRAOptimizer(_LoRAMergeBase):
                     "cache_patches": "disabled",  # sub-merges must not thrash parent cache
                     "free_vram_between_passes": free_vram_between_passes,
                     "vram_budget": vram_budget,
+                    "_skip_qkv_refusion": True,  # sub-merge patches must stay unfused for outer merge compatibility
                 }
                 return self._execute_merge_tree(
                     tree, normalized_stack, model, clip, output_strength,
@@ -6253,7 +6254,9 @@ class LoRAOptimizer(_LoRAMergeBase):
             torch.cuda.empty_cache()
 
         # Re-fuse Z-Image QKV patches if architecture normalization was used
-        if getattr(self, '_detected_arch', None) == 'zimage':
+        # Skip in sub-merges: virtual LoRA patches must stay unfused so the
+        # outer merge can pair them with other LoRAs' unfused keys.
+        if getattr(self, '_detected_arch', None) == 'zimage' and not _skip_qkv_refusion:
             if len(model_patches) > 0:
                 model_patches = self._refuse_zimage_patches(model_patches)
                 logging.info(f"[LoRA Optimizer] Re-fused Z-Image QKV patches ({len(model_patches)} model patches)")
