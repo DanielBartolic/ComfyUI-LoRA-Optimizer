@@ -7194,13 +7194,14 @@ class LoRAAutoTuner(LoRAOptimizer):
                     "diff_cache_ram_pct": diff_cache_ram_pct,
                 }
 
+                # Save _detected_arch — sub-merges may overwrite it
+                # when all resolved items are virtual (no arch detection possible)
+                saved_arch = getattr(self, '_detected_arch', None)
+
                 resolved_stack, sub_reports = self._autotune_resolve_tree(
                     tree, normalized_stack, model, clip, **at_kwargs)
 
                 if len(resolved_stack) >= 2:
-                    # Save _detected_arch — recursive call may overwrite it
-                    # when all resolved items are virtual (no arch detection possible)
-                    saved_arch = getattr(self, '_detected_arch', None)
 
                     # Run outer auto_tune on the resolved flat stack (no formula).
                     # normalize_keys="disabled": stack is already normalized.
@@ -7249,6 +7250,7 @@ class LoRAAutoTuner(LoRAOptimizer):
                 elif len(resolved_stack) == 1:
                     # All sub-merges collapsed to one — update state and fall through
                     logging.info("[LoRA AutoTuner] Formula resolved to single LoRA — skipping outer tune")
+                    self._detected_arch = saved_arch
                     normalized_stack = resolved_stack
                     active_loras = [item for item in normalized_stack if item["strength"] != 0]
                     # Fall through to single-LoRA or normal path below
@@ -7261,7 +7263,7 @@ class LoRAAutoTuner(LoRAOptimizer):
                 model, normalized_stack, output_strength,
                 clip=clip, clip_strength_multiplier=clip_strength_multiplier,
                 normalize_keys=normalize_keys, strategy_set="full",
-                architecture_preset=architecture_preset, vram_budget=vram_budget,
+                architecture_preset=preset_key if merge_formula else architecture_preset, vram_budget=vram_budget,
                 auto_strength_floor=auto_strength_floor,
                 decision_smoothing=decision_smoothing,
                 smooth_slerp_gate=smooth_slerp_gate,
@@ -7817,9 +7819,9 @@ class LoRAAutoTuner(LoRAOptimizer):
                 torch.cuda.empty_cache()
             logging.info("[LoRA AutoTuner] tuning_only mode — returning base model (no merge)")
             result = (model, clip, report, "", tuner_data, None)
-            if cache_patches == "enabled":
+            if cache_patches == "enabled" and not _is_sub_merge:
                 self._autotuner_cache = {at_cache_key: (result, "tuning_only")}
-            else:
+            elif not _is_sub_merge:
                 self._autotuner_cache = {}
             return result
 
@@ -7838,9 +7840,9 @@ class LoRAAutoTuner(LoRAOptimizer):
             torch.cuda.empty_cache()
 
         result = (ret_model, ret_clip, report, ret_analysis_report, tuner_data, ret_lora_data)
-        if cache_patches == "enabled":
+        if cache_patches == "enabled" and not _is_sub_merge:
             self._autotuner_cache = {at_cache_key: (result, "merge")}
-        else:
+        elif not _is_sub_merge:
             self._autotuner_cache = {}
             logging.info("[LoRA AutoTuner] Patch cache disabled — RAM freed after merge")
 
