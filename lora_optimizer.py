@@ -5541,7 +5541,7 @@ class LoRAOptimizer(_LoRAMergeBase):
                     "merge_strategy_override": merge_strategy_override,
                     "merge_refinement": merge_refinement,
                     "strategy_set": strategy_set,
-                    "architecture_preset": architecture_preset,
+                    "architecture_preset": preset_key,  # resolved, not "auto" — prevents wrong detection in all-virtual sub-merges
                     "decision_smoothing": decision_smoothing,
                     "smooth_slerp_gate": smooth_slerp_gate,
                     "cache_patches": "disabled",  # sub-merges must not thrash parent cache
