@@ -166,6 +166,94 @@ def _resolve_arch_preset(arch_override, detected_arch):
     return key, _ARCH_PRESETS[key]
 
 
+def _parse_merge_formula(formula_str, n_loras):
+    """
+    Parse a merge formula string into a tree structure.
+
+    Syntax:
+        expr   = term (('+') term)*
+        term   = atom (':' weight)?
+        atom   = NUMBER | '(' expr ')'
+        weight = FLOAT
+
+    Numbers are 1-indexed LoRA positions. Returns a tree of:
+        {"type": "leaf", "index": int, "weight": float|None}
+        {"type": "group", "children": list, "weight": float|None}
+
+    Raises ValueError on malformed input or out-of-range indices.
+    """
+    formula_str = formula_str.strip()
+    if not formula_str:
+        raise ValueError("Empty merge formula")
+
+    pos = [0]  # mutable position cursor
+
+    def _skip_ws():
+        while pos[0] < len(formula_str) and formula_str[pos[0]] == ' ':
+            pos[0] += 1
+
+    def _parse_weight():
+        _skip_ws()
+        if pos[0] < len(formula_str) and formula_str[pos[0]] == ':':
+            pos[0] += 1  # skip ':'
+            _skip_ws()
+            start = pos[0]
+            while pos[0] < len(formula_str) and (formula_str[pos[0]].isdigit() or formula_str[pos[0]] == '.'):
+                pos[0] += 1
+            if pos[0] == start:
+                raise ValueError(f"Expected weight after ':' at position {pos[0]}")
+            return float(formula_str[start:pos[0]])
+        return None
+
+    def _parse_atom():
+        _skip_ws()
+        if pos[0] >= len(formula_str):
+            raise ValueError("Unexpected end of formula")
+
+        if formula_str[pos[0]] == '(':
+            pos[0] += 1  # skip '('
+            node = _parse_expr()
+            _skip_ws()
+            if pos[0] >= len(formula_str) or formula_str[pos[0]] != ')':
+                raise ValueError(f"Expected ')' at position {pos[0]}")
+            pos[0] += 1  # skip ')'
+            weight = _parse_weight()
+            if weight is not None:
+                node["weight"] = weight
+            return node
+
+        # Must be a number
+        start = pos[0]
+        while pos[0] < len(formula_str) and formula_str[pos[0]].isdigit():
+            pos[0] += 1
+        if pos[0] == start:
+            raise ValueError(f"Unexpected character '{formula_str[pos[0]]}' at position {pos[0]}")
+        index_1based = int(formula_str[start:pos[0]])
+        if index_1based < 1 or index_1based > n_loras:
+            raise ValueError(f"LoRA index {index_1based} out of range (have {n_loras} LoRAs)")
+        weight = _parse_weight()
+        return {"type": "leaf", "index": index_1based - 1, "weight": weight}
+
+    def _parse_expr():
+        children = [_parse_atom()]
+        while True:
+            _skip_ws()
+            if pos[0] < len(formula_str) and formula_str[pos[0]] == '+':
+                pos[0] += 1  # skip '+'
+                children.append(_parse_atom())
+            else:
+                break
+        if len(children) == 1:
+            return children[0]
+        return {"type": "group", "children": children, "weight": None}
+
+    result = _parse_expr()
+    _skip_ws()
+    if pos[0] != len(formula_str):
+        raise ValueError(f"Unexpected content at position {pos[0]}: '{formula_str[pos[0]:]}'")
+    return result
+
+
 class LoRAStack:
     """
     Node for creating a LoRA stack (input format for LoRAOptimizer).
@@ -1297,12 +1385,16 @@ class _LoRAMergeBase:
             ".alpha",
         ]
         for item in active_loras:
+            if item.get("_precomputed_diffs"):
+                for key in item["lora"]:
+                    all_lora_prefixes.add(key)
+                continue
             for key in item["lora"].keys():
                 for suffix in suffixes:
                     if key.endswith(suffix):
                         all_lora_prefixes.add(key[:-len(suffix)])
                         break
-        return sorted(all_lora_prefixes)
+        return sorted(all_lora_prefixes, key=lambda x: (str(x),))
 
     @staticmethod
     def _resolve_target_key(lora_prefix, model_keys, clip_keys):
@@ -1337,10 +1429,27 @@ class _LoRAMergeBase:
         on actual model weights rather than raw trainer-specific prefixes.
         """
         grouped = {}
+        # Build reverse lookup: target_key → True for fast virtual-key detection
+        model_target_keys = set()
+        for v in (model_keys.values() if model_keys else []):
+            model_target_keys.add(v)
+            if isinstance(v, tuple):
+                model_target_keys.add(v[0])
+        clip_target_keys = set()
+        for v in (clip_keys.values() if clip_keys else []):
+            clip_target_keys.add(v)
+            if isinstance(v, tuple):
+                clip_target_keys.add(v[0])
         for prefix in all_lora_prefixes:
             target_key, is_clip = self._resolve_target_key(prefix, model_keys, clip_keys)
             if target_key is None:
-                continue
+                # Virtual LoRA keys are already target keys — map to themselves
+                if prefix in model_target_keys:
+                    target_key, is_clip = prefix, False
+                elif prefix in clip_target_keys:
+                    target_key, is_clip = prefix, True
+                else:
+                    continue
             group_id = self._make_target_group_id(target_key, is_clip)
             entry = grouped.setdefault(group_id, {
                 "target_key": target_key,
@@ -1352,8 +1461,12 @@ class _LoRAMergeBase:
         ordered = {}
         prepared = []
         for entry in grouped.values():
-            aliases = sorted(set(entry["aliases"]))
-            canonical = self._choose_canonical_prefix(aliases)
+            aliases = sorted(a for a in set(entry["aliases"]) if isinstance(a, str))
+            if not aliases:
+                canonical = str(entry["target_key"])
+                aliases = [canonical]
+            else:
+                canonical = self._choose_canonical_prefix(aliases)
             prepared.append((entry["is_clip"], canonical, {
                 "target_key": entry["target_key"],
                 "is_clip": entry["is_clip"],
@@ -1459,6 +1572,35 @@ class _LoRAMergeBase:
         for i, item in enumerate(active_loras):
             diff_accum = None
             rank_sum = 0
+
+            # Virtual LoRAs from sub-merges store pre-computed diffs keyed by target key
+            if item.get("_precomputed_diffs"):
+                tkey = target_key
+                raw = item["lora"].get(tkey)
+                if raw is None and isinstance(tkey, tuple):
+                    raw = item["lora"].get(tkey[0])
+                if raw is not None:
+                    if isinstance(raw, torch.Tensor):
+                        diff = raw.float()
+                    else:
+                        diff = self._expand_patch_to_diff(raw)
+                    if device is not None and diff.device != device:
+                        diff = diff.to(device)
+                    try:
+                        diff = diff.reshape(target_shape)
+                    except RuntimeError:
+                        diff = None
+                    if diff is not None:
+                        raw_contributors.add(i)
+                        rank_sum += 1
+                        if storage_dtype is None:
+                            storage_dtype = raw.dtype if isinstance(raw, torch.Tensor) else diff.dtype
+                        diff_accum = diff
+                if diff_accum is not None:
+                    aggregated[i] = diff_accum
+                    ranks[i] = rank_sum
+                continue
+
             for alias in target_group["aliases"]:
                 cache_key = (alias, i)
                 if diff_cache is not None and cache_key in diff_cache:
@@ -1511,14 +1653,15 @@ class _LoRAMergeBase:
                     if diff_cache is not None:
                         diff_cache.put(cache_key, diff)
                     diff = diff.float()
-                else:
-                    skip_count += 1
-                    continue
-                diff_accum = diff if diff_accum is None else diff_accum + diff
+                    diff_accum = diff if diff_accum is None else diff_accum + diff
 
             if diff_accum is not None:
                 aggregated[i] = diff_accum
                 ranks[i] = rank_sum
+            elif i in raw_contributors:
+                pass  # contributed via cache but diff_accum ended up None (shouldn't happen)
+            else:
+                skip_count += 1
 
         raw_n = len(aggregated)
         if raw_n == 0:
@@ -2966,6 +3109,13 @@ class _LoRAMergeBase:
         if not lora_stack:
             return []
 
+        # Filter out formula metadata entries (safety net — optimize_merge
+        # also strips these before calling _normalize_stack)
+        lora_stack = [item for item in lora_stack
+                      if not (isinstance(item, dict) and "_merge_formula" in item)]
+        if not lora_stack:
+            return []
+
         first = lora_stack[0]
         normalized = []
 
@@ -3016,10 +3166,11 @@ class _LoRAMergeBase:
                     "name": item["name"],
                     "lora": item["lora"],
                     "strength": item["strength"],
-                    "clip_strength": None,  # use global multiplier
+                    "clip_strength": item.get("clip_strength", None),
                     "conflict_mode": item.get("conflict_mode", "all"),
                     "key_filter": item.get("key_filter", "all"),
                     "metadata": item.get("metadata", {}),
+                    "_precomputed_diffs": item.get("_precomputed_diffs", False),
                 })
 
         else:
@@ -3030,6 +3181,8 @@ class _LoRAMergeBase:
         if len(normalized) > 0:
             arch = "unknown"
             for item in normalized:
+                if item.get("_precomputed_diffs"):
+                    continue  # virtual LoRAs have model-space keys, not LoRA keys
                 detected = self._detect_architecture(item["lora"])
                 if detected != "unknown":
                     arch = detected
@@ -3042,7 +3195,8 @@ class _LoRAMergeBase:
                     logging.info(f"[LoRA Optimizer] Architecture detected: {arch}")
                     logging.info(f"[LoRA Optimizer] Normalizing keys for {len(normalized)} LoRAs...")
                     for item in normalized:
-                        item["lora"] = self._normalize_keys(item["lora"], arch)
+                        if not item.get("_precomputed_diffs"):
+                            item["lora"] = self._normalize_keys(item["lora"], arch)
                 else:
                     logging.info("[LoRA Optimizer] Architecture: unknown (no key normalization applied)")
 
@@ -3578,6 +3732,62 @@ def _run_autotuner_evaluator(evaluator, model, clip, lora_data, config, analysis
     }
 
 
+class LoRAMergeFormula:
+    """
+    Passthrough node that attaches a merge formula to the LoRA stack.
+    The formula defines hierarchical merge order, e.g., "(1+2) + 3"
+    merges LoRAs 1 & 2 first, then merges the result with LoRA 3.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "lora_stack": ("LORA_STACK", {
+                    "tooltip": "The LoRA stack to apply the merge formula to."
+                }),
+                "formula": ("STRING", {
+                    "default": "",
+                    "tooltip": "Merge formula defining hierarchical merge order. "
+                               "Numbers reference 1-indexed LoRA positions in the stack. "
+                               "Use + to combine and () to group sub-merges. "
+                               "Example: '(1+2) + 3' merges LoRAs 1 & 2 first, then blends with 3. "
+                               "Optional weights: '(1+2):0.6 + 3:0.4'. "
+                               "Leave empty for default flat merge."
+                }),
+            }
+        }
+
+    RETURN_TYPES = ("LORA_STACK",)
+    RETURN_NAMES = ("lora_stack",)
+    FUNCTION = "apply_formula"
+    CATEGORY = "LoRA Optimizer"
+    DESCRIPTION = "Attaches a merge formula to the LoRA stack to control hierarchical merge order"
+
+    def apply_formula(self, lora_stack, formula):
+        output = list(lora_stack) if lora_stack else []
+        formula = formula.strip()
+        if not formula:
+            return (output,)
+
+        # Count actual LoRAs (exclude any existing formula metadata)
+        n_loras = sum(1 for item in output
+                      if not (isinstance(item, dict) and "_merge_formula" in item))
+
+        # Validate formula
+        try:
+            _parse_merge_formula(formula, n_loras)
+        except ValueError as e:
+            logging.warning(f"[LoRA Optimizer] Invalid merge formula: {e} — using flat merge")
+            return (output,)
+
+        # Remove any existing formula metadata (in case of chaining)
+        output = [item for item in output
+                  if not (isinstance(item, dict) and "_merge_formula" in item)]
+        output.append({"_merge_formula": formula})
+        return (output,)
+
+
 class LoRAOptimizer(_LoRAMergeBase):
     """
     Auto-optimizer that analyzes a LoRA stack (sign conflicts, magnitude
@@ -3870,8 +4080,27 @@ class LoRAOptimizer(_LoRAMergeBase):
         partial_stats = []
         skip_count = 0
         for i, item in enumerate(active_loras):
-            lora_info = self._get_lora_key_info(item["lora"], lora_prefix)
-            if lora_info is not None:
+            # Virtual LoRAs from sub-merges store pre-computed diffs keyed by target key
+            if item.get("_precomputed_diffs"):
+                tkey = target_key
+                raw = item["lora"].get(tkey)
+                if raw is None and isinstance(tkey, tuple):
+                    raw = item["lora"].get(tkey[0])
+                if raw is not None:
+                    if isinstance(raw, torch.Tensor):
+                        diff = raw.float()
+                    else:
+                        diff = self._expand_patch_to_diff(raw)
+                    if device is not None and diff.device != device:
+                        diff = diff.to(device)
+                    try:
+                        diff = diff.reshape(target_shape)
+                    except RuntimeError:
+                        diff = None
+                    rank = 1
+                else:
+                    continue
+            elif (lora_info := self._get_lora_key_info(item["lora"], lora_prefix)) is not None:
                 mat_up, mat_down, alpha, mid = lora_info
                 rank = mat_down.shape[0]
                 diff = self._compute_lora_diff(mat_up, mat_down, alpha, mid, target_shape, device=device)
@@ -3978,8 +4207,29 @@ class LoRAOptimizer(_LoRAMergeBase):
         skip_count = 0
 
         for i, item in enumerate(active_loras):
-            lora_info = self._get_lora_key_info(item["lora"], lora_prefix)
-            if lora_info is not None:
+            # Virtual LoRAs from sub-merges store pre-computed diffs keyed by target key
+            if item.get("_precomputed_diffs"):
+                tkey = target_key
+                raw = item["lora"].get(tkey)
+                if raw is None and isinstance(tkey, tuple):
+                    raw = item["lora"].get(tkey[0])
+                if raw is None:
+                    continue
+                if isinstance(raw, torch.Tensor):
+                    diff = raw.float()
+                else:
+                    diff = self._expand_patch_to_diff(raw)
+                if device is not None and diff.device != device:
+                    diff = diff.to(device)
+                try:
+                    diff = diff.reshape(target_shape)
+                except RuntimeError:
+                    skip_count += 1
+                    continue
+                if use_gpu and diff.device.type == "cpu":
+                    diff = diff.to(device)
+                rank = 1  # unknown rank for virtual LoRAs
+            elif (lora_info := self._get_lora_key_info(item["lora"], lora_prefix)) is not None:
                 mat_up, mat_down, alpha, mid = lora_info
                 rank = mat_down.shape[0]
 
@@ -5223,7 +5473,7 @@ class LoRAOptimizer(_LoRAMergeBase):
             smooth_slerp_gate=smooth_slerp_gate,
         )
 
-    def optimize_merge(self, model, lora_stack, output_strength, clip=None, clip_strength_multiplier=1.0, auto_strength="disabled", auto_strength_floor=-1.0, free_vram_between_passes="disabled", vram_budget=0.0, optimization_mode="per_prefix", cache_patches="enabled", patch_compression="smart", svd_device="gpu", normalize_keys="disabled", sparsification="disabled", sparsification_density=0.7, dare_dampening=0.0, merge_strategy_override="", merge_refinement="none", strategy_set="full", architecture_preset="auto", decision_smoothing=0.25, smooth_slerp_gate=False, _analysis_cache=None, _diff_cache=None, _skip_report=False):
+    def optimize_merge(self, model, lora_stack, output_strength, clip=None, clip_strength_multiplier=1.0, auto_strength="disabled", auto_strength_floor=-1.0, free_vram_between_passes="disabled", vram_budget=0.0, optimization_mode="per_prefix", cache_patches="enabled", patch_compression="smart", svd_device="gpu", normalize_keys="disabled", sparsification="disabled", sparsification_density=0.7, dare_dampening=0.0, merge_strategy_override="", merge_refinement="none", strategy_set="full", architecture_preset="auto", decision_smoothing=0.25, smooth_slerp_gate=False, _analysis_cache=None, _diff_cache=None, _skip_report=False, _skip_qkv_refusion=False):
         """
         Main entry point. Two-pass streaming architecture:
         Pass 1: Resolve aliases to target groups, compute diffs, sample metrics, discard diffs
@@ -5254,6 +5504,17 @@ class LoRAOptimizer(_LoRAMergeBase):
         if not lora_stack or len(lora_stack) == 0:
             return (model, clip, "No LoRAs in stack.", None, None)
 
+        # Extract merge formula metadata before normalization
+        merge_formula = None
+        clean_stack = []
+        for item in lora_stack:
+            if isinstance(item, dict) and "_merge_formula" in item:
+                merge_formula = item["_merge_formula"]
+            else:
+                clean_stack.append(item)
+        if merge_formula:
+            lora_stack = clean_stack
+
         normalized_stack = self._normalize_stack(lora_stack, normalize_keys=normalize_keys)
         active_loras = [item for item in normalized_stack if item["strength"] != 0]
 
@@ -5264,6 +5525,42 @@ class LoRAOptimizer(_LoRAMergeBase):
         preset_key, arch_preset = _resolve_arch_preset(
             architecture_preset, getattr(self, '_detected_arch', None) or 'unknown')
         logging.info(f"[LoRA Optimizer] Architecture preset: {preset_key} ({arch_preset['display_name']})")
+
+        # Formula-based hierarchical merge
+        if merge_formula and len(active_loras) >= 2:
+            try:
+                tree = _parse_merge_formula(merge_formula, len(normalized_stack))
+            except ValueError as e:
+                logging.warning(f"[LoRA Optimizer] Invalid merge formula: {e} — using flat merge")
+                tree = None
+
+            if tree is not None and tree["type"] == "group":
+                logging.info(f"[LoRA Optimizer] Using merge formula: {merge_formula}")
+                merge_kwargs = {
+                    "clip_strength_multiplier": clip_strength_multiplier,
+                    "auto_strength": auto_strength,
+                    "auto_strength_floor": auto_strength_floor,
+                    "optimization_mode": optimization_mode,
+                    "patch_compression": patch_compression,
+                    "svd_device": svd_device,
+                    "normalize_keys": normalize_keys,
+                    "sparsification": sparsification,
+                    "sparsification_density": sparsification_density,
+                    "dare_dampening": dare_dampening,
+                    "merge_strategy_override": merge_strategy_override,
+                    "merge_refinement": merge_refinement,
+                    "strategy_set": strategy_set,
+                    "architecture_preset": preset_key,  # resolved, not "auto" — prevents wrong detection in all-virtual sub-merges
+                    "decision_smoothing": decision_smoothing,
+                    "smooth_slerp_gate": smooth_slerp_gate,
+                    "cache_patches": "disabled",  # sub-merges must not thrash parent cache
+                    "free_vram_between_passes": free_vram_between_passes,
+                    "vram_budget": vram_budget,
+                    "_skip_qkv_refusion": True,  # sub-merge patches must stay unfused for outer merge compatibility
+                }
+                return self._execute_merge_tree(
+                    tree, normalized_stack, model, clip, output_strength,
+                    _orig_cache_patches=cache_patches, **merge_kwargs)
 
         # Single LoRA: skip analysis, apply directly via ComfyUI's standard
         # additive LoRA application (faster than diff-based pipeline).
@@ -5634,6 +5931,7 @@ class LoRAOptimizer(_LoRAMergeBase):
         compressed_count = 0
         strategy_counts = {"weighted_sum": 0, "weighted_average": 0, "slerp": 0, "ties": 0, "consensus": 0}
         prefix_decisions = []  # list of (prefix, mode, conflict_ratio, n_loras) for block map
+        has_virtual_loras = any(item.get("_precomputed_diffs") for item in active_loras)
 
         # VRAM budget for patch storage
         vram_budget_bytes = 0
@@ -5719,7 +6017,8 @@ class LoRAOptimizer(_LoRAMergeBase):
             linear_stats = None
             if (pf_mode in ("weighted_sum", "weighted_average", "normalize")
                     and sparsification == "disabled"
-                    and merge_refinement == "none"):
+                    and merge_refinement == "none"
+                    and not has_virtual_loras):
                 linear_patch_info = self._build_exact_linear_patch(
                     target_group, active_loras, raw_n, pf_mode,
                     is_clip_key=is_clip_key, model_scale=model_auto_scale,
@@ -5960,7 +6259,9 @@ class LoRAOptimizer(_LoRAMergeBase):
             torch.cuda.empty_cache()
 
         # Re-fuse Z-Image QKV patches if architecture normalization was used
-        if getattr(self, '_detected_arch', None) == 'zimage':
+        # Skip in sub-merges: virtual LoRA patches must stay unfused so the
+        # outer merge can pair them with other LoRAs' unfused keys.
+        if getattr(self, '_detected_arch', None) == 'zimage' and not _skip_qkv_refusion:
             if len(model_patches) > 0:
                 model_patches = self._refuse_zimage_patches(model_patches)
                 logging.info(f"[LoRA Optimizer] Re-fused Z-Image QKV patches ({len(model_patches)} model patches)")
@@ -6078,6 +6379,172 @@ class LoRAOptimizer(_LoRAMergeBase):
         logging.info(f"[LoRA Optimizer] Done! {processed_keys} keys processed ({time.time() - t_start:.1f}s total)")
 
         return (new_model, new_clip, report, None, lora_data)
+
+    # ------------------------------------------------------------------
+    #  Merge-formula tree executor
+    # ------------------------------------------------------------------
+
+    def _execute_merge_tree(self, tree, normalized_stack, model, clip, output_strength, _orig_cache_patches="enabled", **kwargs):
+        """
+        Execute a merge formula tree leaf-to-root.
+        Each sub-group is a full optimize_merge call.
+        Returns the same 5-tuple as optimize_merge.
+        """
+        # Save _detected_arch — sub-merges may overwrite it (e.g. all-virtual stacks)
+        saved_arch = getattr(self, '_detected_arch', None)
+
+        # Collect the final flat stack by recursively resolving groups
+        final_stack, sub_reports = self._resolve_tree_to_stack(
+            tree, normalized_stack, model, clip, **kwargs)
+
+        # Restore _detected_arch for the final merge
+        self._detected_arch = saved_arch
+
+        # Final merge: restore original cache_patches setting (sub-merges use "disabled")
+        final_kwargs = dict(kwargs)
+        final_kwargs["cache_patches"] = _orig_cache_patches
+        final_kwargs["_skip_qkv_refusion"] = False  # final merge must re-fuse QKV for Z-Image
+        result = self.optimize_merge(model, final_stack, output_strength, clip=clip, **final_kwargs)
+
+        # Prepend sub-reports to the final report
+        if sub_reports:
+            if len(result) == 3:
+                model_out, report, lora_data = result
+                clip_out, tuner_data = None, None
+            else:
+                model_out, clip_out, report, tuner_data, lora_data = result
+            separator = "\n" + "=" * 50 + "\n"
+            sub_section = separator.join(sub_reports)
+            report = (
+                "MERGE FORMULA SUB-MERGE REPORTS\n"
+                + separator + sub_section + separator
+                + "\nFINAL MERGE REPORT:\n" + report
+            )
+            if len(result) == 3:
+                result = (model_out, report, lora_data)
+            else:
+                result = (model_out, clip_out, report, tuner_data, lora_data)
+
+        return result
+
+    def _resolve_tree_to_stack(self, tree, normalized_stack, model, clip, **kwargs):
+        """
+        Recursively resolve a merge tree into a flat LoRA stack.
+        Groups are merged into virtual LoRAs; leaves reference the original stack.
+        Returns (resolved_stack, sub_reports).
+        """
+        sub_reports = []
+
+        if tree["type"] == "leaf":
+            item = dict(normalized_stack[tree["index"]])
+            if "metadata" in item and isinstance(item["metadata"], dict):
+                item["metadata"] = dict(item["metadata"])
+            if tree["weight"] is not None:
+                item["strength"] = tree["weight"]
+            return ([item], sub_reports)
+
+        # Group: resolve each child
+        resolved = []
+        for child in tree["children"]:
+            if child["type"] == "leaf":
+                item = dict(normalized_stack[child["index"]])
+                if "metadata" in item and isinstance(item["metadata"], dict):
+                    item["metadata"] = dict(item["metadata"])
+                if child["weight"] is not None:
+                    item["strength"] = child["weight"]
+                resolved.append(item)
+            else:
+                # Sub-group: resolve recursively then merge
+                sub_stack, child_reports = self._resolve_tree_to_stack(
+                    child, normalized_stack, model, clip, **kwargs)
+                sub_reports.extend(child_reports)
+
+                if len(sub_stack) >= 2:
+                    # Merge this sub-group via full pipeline
+                    try:
+                        sub_result = self.optimize_merge(
+                            model, sub_stack, 1.0, clip=clip, **kwargs)
+                        if len(sub_result) == 3:
+                            sub_model, sub_report, sub_lora_data = sub_result
+                            sub_clip = None
+                        else:
+                            sub_model, sub_clip, sub_report, _, sub_lora_data = sub_result
+                        sub_reports.append(sub_report)
+
+                        if sub_lora_data is None:
+                            # Single-LoRA fast path was hit (e.g. other LoRA had strength 0)
+                            # Pass sub-stack items through directly instead of empty virtual LoRA
+                            del sub_model, sub_clip, sub_result
+                            for sub_item in sub_stack:
+                                item = dict(sub_item)
+                                if child.get("weight") is not None:
+                                    item["strength"] = child["weight"]
+                                resolved.append(item)
+                            continue
+
+                        # Extract patches as virtual LoRA from merge output
+                        sub_model_patches = sub_lora_data.get("model_patches", {})
+                        sub_clip_patches = sub_lora_data.get("clip_patches", {})
+                        virtual = self._model_to_virtual_lora(
+                            sub_model_patches, sub_clip_patches, child)
+                        del sub_model, sub_clip, sub_result, sub_lora_data
+                        if child["weight"] is not None:
+                            virtual["strength"] = child["weight"]
+                        resolved.append(virtual)
+                    except Exception as e:
+                        logging.warning(
+                            f"[LoRA Optimizer] Sub-merge failed: {e} — "
+                            "falling back to flat merge for this sub-group")
+                        for item in sub_stack:
+                            resolved.append(item)
+                elif len(sub_stack) == 1:
+                    item = sub_stack[0]
+                    if child["weight"] is not None:
+                        item["strength"] = child["weight"]
+                    resolved.append(item)
+
+        return (resolved, sub_reports)
+
+    @staticmethod
+    def _model_to_virtual_lora(model_patches, clip_patches, tree_node):
+        """
+        Build a virtual LoRA from pre-computed merge patches.
+        Stores the actual diff tensors (keyed by target model key) so the
+        merge pipeline can use them directly without LoRA decomposition.
+        """
+        virtual_lora = {}
+
+        for key, patch in model_patches.items():
+            # Store raw patch; expansion to dense is deferred to the merge
+            # loop so compressed adapters (LoRAAdapter etc.) don't blow up
+            # memory here.
+            if isinstance(patch, tuple) and patch[0] == "diff":
+                virtual_lora[key] = patch[1][0]  # extract the tensor
+            else:
+                virtual_lora[key] = patch  # tensor or adapter object
+
+        for key, patch in clip_patches.items():
+            if isinstance(patch, tuple) and patch[0] == "diff":
+                virtual_lora[key] = patch[1][0]
+            else:
+                virtual_lora[key] = patch
+
+        # Build label from tree
+        def _tree_label(node):
+            if node["type"] == "leaf":
+                return str(node["index"] + 1)
+            return "(" + "+".join(_tree_label(c) for c in node["children"]) + ")"
+
+        return {
+            "name": _tree_label(tree_node),
+            "lora": virtual_lora,
+            "_precomputed_diffs": True,
+            "strength": 1.0,
+            "clip_strength": None,
+            "conflict_mode": "all",
+            "key_filter": "all",
+            "metadata": {},
+        }
 
 
 class LoRAMergeSettings:
@@ -6667,7 +7134,8 @@ class LoRAAutoTuner(LoRAOptimizer):
                   cache_patches="enabled",
                   diff_cache_mode="disabled", diff_cache_ram_pct=0.5, vram_budget=0.0,
                   scoring_speed="full", scoring_formula="v2", output_mode="merge",
-                  decision_smoothing=0.25, smooth_slerp_gate=False):
+                  decision_smoothing=0.25, smooth_slerp_gate=False,
+                  _is_sub_merge=False, _suppress_pbar=False):
         import hashlib, json
 
         # Free stale cached models when the input model changes
@@ -6681,24 +7149,129 @@ class LoRAAutoTuner(LoRAOptimizer):
             gc.collect()
         self._cached_model_id = current_mid
 
+        # --- Extract merge formula before normalization ---
+        merge_formula = None
+        clean_stack = []
+        for item in lora_stack:
+            if isinstance(item, dict) and "_merge_formula" in item:
+                merge_formula = item["_merge_formula"]
+            else:
+                clean_stack.append(item)
+        if merge_formula:
+            lora_stack = clean_stack
+
         # --- Normalize & validate stack ---
         normalized_stack = self._normalize_stack(lora_stack, normalize_keys=normalize_keys)
         active_loras = [item for item in normalized_stack if item["strength"] != 0]
         if not active_loras:
             return (model, clip, "No active LoRAs in stack.", "", None, None)
 
+        # --- Formula-based hierarchical auto-tune ---
+        if merge_formula and len(active_loras) >= 2:
+            try:
+                tree = _parse_merge_formula(merge_formula, len(normalized_stack))
+            except ValueError as e:
+                logging.warning(f"[LoRA AutoTuner] Invalid merge formula: {e} — using flat auto-tune")
+                tree = None
+
+            if tree is not None and tree["type"] == "group":
+                logging.info(f"[LoRA AutoTuner] Using merge formula: {merge_formula}")
+
+                # Resolve architecture preset before sub-merges
+                preset_key, _ = _resolve_arch_preset(
+                    architecture_preset, getattr(self, '_detected_arch', None) or 'unknown')
+
+                at_kwargs = {
+                    "clip_strength_multiplier": clip_strength_multiplier,
+                    "top_n": top_n,
+                    "normalize_keys": normalize_keys,
+                    "scoring_svd": scoring_svd,
+                    "scoring_device": scoring_device,
+                    "architecture_preset": preset_key,
+                    "auto_strength_floor": auto_strength_floor,
+                    "decision_smoothing": decision_smoothing,
+                    "smooth_slerp_gate": smooth_slerp_gate,
+                    "vram_budget": vram_budget,
+                    "scoring_speed": scoring_speed,
+                    "scoring_formula": scoring_formula,
+                    "diff_cache_mode": diff_cache_mode,
+                    "diff_cache_ram_pct": diff_cache_ram_pct,
+                }
+
+                # Save _detected_arch — sub-merges may overwrite it
+                # when all resolved items are virtual (no arch detection possible)
+                saved_arch = getattr(self, '_detected_arch', None)
+
+                resolved_stack, sub_reports = self._autotune_resolve_tree(
+                    tree, normalized_stack, model, clip, **at_kwargs)
+
+                if len(resolved_stack) >= 2:
+
+                    # Run outer auto_tune on the resolved flat stack (no formula).
+                    # normalize_keys="disabled": stack is already normalized.
+                    outer_result = self.auto_tune(
+                        model, resolved_stack, output_strength,
+                        clip=clip,
+                        clip_strength_multiplier=clip_strength_multiplier,
+                        top_n=top_n,
+                        normalize_keys="disabled",
+                        scoring_svd=scoring_svd,
+                        scoring_device=scoring_device,
+                        architecture_preset=preset_key,
+                        auto_strength_floor=auto_strength_floor,
+                        evaluator=evaluator,
+                        record_dataset=record_dataset,
+                        cache_patches=cache_patches,
+                        diff_cache_mode=diff_cache_mode,
+                        diff_cache_ram_pct=diff_cache_ram_pct,
+                        vram_budget=vram_budget,
+                        scoring_speed=scoring_speed,
+                        scoring_formula=scoring_formula,
+                        output_mode=output_mode,
+                        decision_smoothing=decision_smoothing,
+                        smooth_slerp_gate=smooth_slerp_gate,
+                        _is_sub_merge=_is_sub_merge,
+                        _suppress_pbar=_suppress_pbar,
+                    )
+
+                    # Restore _detected_arch
+                    self._detected_arch = saved_arch
+
+                    # Prepend sub-reports to the outer report
+                    if sub_reports:
+                        # outer_result is 6-tuple
+                        ret_model, ret_clip, report, analysis_report, tuner_data, lora_data = outer_result
+                        separator = "\n" + "=" * 50 + "\n"
+                        sub_section = separator.join(sub_reports)
+                        report = (
+                            "AUTOTUNER FORMULA SUB-MERGE REPORTS\n"
+                            + separator + sub_section + separator
+                            + "\nFINAL AUTOTUNER REPORT:\n" + report
+                        )
+                        outer_result = (ret_model, ret_clip, report, analysis_report, tuner_data, lora_data)
+
+                    return outer_result
+                elif len(resolved_stack) == 1:
+                    # All sub-merges collapsed to one — update state and fall through
+                    logging.info("[LoRA AutoTuner] Formula resolved to single LoRA — skipping outer tune")
+                    self._detected_arch = saved_arch
+                    normalized_stack = resolved_stack
+                    active_loras = [item for item in normalized_stack if item["strength"] != 0]
+                    # Fall through to single-LoRA or normal path below
+
         if len(active_loras) == 1:
             # Single LoRA: nothing to tune, delegate directly
             if output_mode == "tuning_only":
                 return (model, clip, "Single LoRA detected -- tuning_only passthrough.", "", None, None)
             merged_model, merged_clip, report, _, lora_data = super().optimize_merge(
-                model, lora_stack, output_strength,
+                model, normalized_stack, output_strength,
                 clip=clip, clip_strength_multiplier=clip_strength_multiplier,
                 normalize_keys=normalize_keys, strategy_set="full",
-                architecture_preset=architecture_preset, vram_budget=vram_budget,
+                architecture_preset=preset_key if merge_formula else architecture_preset, vram_budget=vram_budget,
                 auto_strength_floor=auto_strength_floor,
                 decision_smoothing=decision_smoothing,
                 smooth_slerp_gate=smooth_slerp_gate,
+                _skip_qkv_refusion=_is_sub_merge,
             )
             return (merged_model, merged_clip,
                     "Single LoRA detected -- no parameters to tune.\n\n" + report, report, None, lora_data)
@@ -6745,7 +7318,12 @@ class LoRAAutoTuner(LoRAOptimizer):
         t_start = time.time()
         # Progress bar: analysis groups + top_n merges (+ 1 final merge when subsampling)
         n_pbar_merges = top_n + (1 if scoring_speed != "full" and top_n > 1 and output_mode != "tuning_only" else 0)
-        pbar = comfy.utils.ProgressBar(len(target_groups) + n_pbar_merges)
+        if _suppress_pbar:
+            class _NullPbar:
+                def update(self, n): pass
+            pbar = _NullPbar()
+        else:
+            pbar = comfy.utils.ProgressBar(len(target_groups) + n_pbar_merges)
         analysis_data = self._run_group_analysis(
             target_groups, active_loras, model, clip, compute_device,
             clip_strength_multiplier=clip_strength_multiplier,
@@ -6961,6 +7539,7 @@ class LoRAAutoTuner(LoRAOptimizer):
                 _analysis_cache=scoring_cache,
                 _diff_cache=_diff_cache,
                 _skip_report=True,
+                _skip_qkv_refusion=_is_sub_merge,
             )
 
             # Measure output quality (single-LoRA prefixes may still produce
@@ -7168,6 +7747,7 @@ class LoRAAutoTuner(LoRAOptimizer):
                 _analysis_cache=_analysis_cache,
                 _diff_cache=_diff_cache,
                 _skip_report=True,
+                _skip_qkv_refusion=_is_sub_merge,
             )
             logging.info(f"[LoRA AutoTuner] Final merge complete ({time.time() - t_final:.1f}s)")
             pbar.update(1)
@@ -7243,9 +7823,9 @@ class LoRAAutoTuner(LoRAOptimizer):
                 torch.cuda.empty_cache()
             logging.info("[LoRA AutoTuner] tuning_only mode — returning base model (no merge)")
             result = (model, clip, report, "", tuner_data, None)
-            if cache_patches == "enabled":
+            if cache_patches == "enabled" and not _is_sub_merge:
                 self._autotuner_cache = {at_cache_key: (result, "tuning_only")}
-            else:
+            elif not _is_sub_merge:
                 self._autotuner_cache = {}
             return result
 
@@ -7264,13 +7844,97 @@ class LoRAAutoTuner(LoRAOptimizer):
             torch.cuda.empty_cache()
 
         result = (ret_model, ret_clip, report, ret_analysis_report, tuner_data, ret_lora_data)
-        if cache_patches == "enabled":
+        if cache_patches == "enabled" and not _is_sub_merge:
             self._autotuner_cache = {at_cache_key: (result, "merge")}
-        else:
+        elif not _is_sub_merge:
             self._autotuner_cache = {}
             logging.info("[LoRA AutoTuner] Patch cache disabled — RAM freed after merge")
 
         return result
+
+    def _autotune_resolve_tree(self, tree, normalized_stack, model, clip, **at_kwargs):
+        """
+        Recursively resolve a merge formula tree, running auto_tune for each
+        sub-group with 2+ items.  Returns (resolved_stack, sub_reports).
+        Same tree format as _resolve_tree_to_stack but uses AutoTuner for sub-merges.
+        """
+        sub_reports = []
+
+        if tree["type"] == "leaf":
+            item = dict(normalized_stack[tree["index"]])
+            if "metadata" in item and isinstance(item["metadata"], dict):
+                item["metadata"] = dict(item["metadata"])
+            if tree["weight"] is not None:
+                item["strength"] = tree["weight"]
+            return ([item], sub_reports)
+
+        # Group: resolve each child
+        resolved = []
+        for child in tree["children"]:
+            if child["type"] == "leaf":
+                item = dict(normalized_stack[child["index"]])
+                if "metadata" in item and isinstance(item["metadata"], dict):
+                    item["metadata"] = dict(item["metadata"])
+                if child["weight"] is not None:
+                    item["strength"] = child["weight"]
+                resolved.append(item)
+            else:
+                # Sub-group: resolve recursively then auto-tune
+                sub_stack, child_reports = self._autotune_resolve_tree(
+                    child, normalized_stack, model, clip, **at_kwargs)
+                sub_reports.extend(child_reports)
+
+                if len(sub_stack) >= 2:
+                    try:
+                        # Override settings for sub-merge
+                        sub_kwargs = dict(at_kwargs)
+                        sub_kwargs["cache_patches"] = "disabled"
+                        sub_kwargs["record_dataset"] = "disabled"
+                        sub_kwargs["output_mode"] = "merge"
+                        sub_kwargs["_is_sub_merge"] = True
+                        sub_kwargs["_suppress_pbar"] = True
+                        # Evaluator is excluded: it may be prompt-specific and
+                        # inappropriate for sub-groups (character-only merge etc.)
+
+                        sub_result = self.auto_tune(
+                            model, sub_stack, 1.0, clip=clip, **sub_kwargs)
+
+                        # auto_tune returns 6-tuple
+                        sub_model, sub_clip, sub_report, _, _, sub_lora_data = sub_result
+
+                        sub_reports.append(sub_report)
+
+                        if sub_lora_data is None:
+                            # Fallback: pass items through
+                            for sub_item in sub_stack:
+                                item = dict(sub_item)
+                                if child.get("weight") is not None:
+                                    item["strength"] = child["weight"]
+                                resolved.append(item)
+                            continue
+
+                        # Build virtual LoRA from sub-merge result
+                        sub_model_patches = sub_lora_data.get("model_patches", {})
+                        sub_clip_patches = sub_lora_data.get("clip_patches", {})
+                        virtual = self._model_to_virtual_lora(
+                            sub_model_patches, sub_clip_patches, child)
+                        del sub_model, sub_clip, sub_result, sub_lora_data
+                        if child["weight"] is not None:
+                            virtual["strength"] = child["weight"]
+                        resolved.append(virtual)
+                    except Exception as e:
+                        logging.warning(
+                            f"[LoRA AutoTuner] Sub-merge auto_tune failed: {e} — "
+                            "falling back to flat merge for this sub-group")
+                        for item in sub_stack:
+                            resolved.append(item)
+                elif len(sub_stack) == 1:
+                    item = sub_stack[0]
+                    if child["weight"] is not None:
+                        item["strength"] = child["weight"]
+                    resolved.append(item)
+
+        return (resolved, sub_reports)
 
     def _save_tuner_dataset_entry(self, tuner_data, active_loras, prefix_stats,
                                   detected_arch):
@@ -9322,6 +9986,7 @@ NODE_CLASS_MAPPINGS = {
     "LoRAOptimizerSettings": LoRAOptimizerSettings,
     "LoRAAutoTunerSettings": LoRAAutoTunerSettings,
     "LoRAMetadataReader": LoRAMetadataReader,
+    "LoRAMergeFormula": LoRAMergeFormula,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -9344,4 +10009,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "LoRAOptimizerSettings": "LoRA Optimizer Settings",
     "LoRAAutoTunerSettings": "LoRA AutoTuner Settings",
     "LoRAMetadataReader": "LoRA Metadata Reader",
+    "LoRAMergeFormula": "LoRA Merge Formula",
 }

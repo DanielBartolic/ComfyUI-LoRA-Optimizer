@@ -463,6 +463,243 @@ class LoRAOptimizerTests(unittest.TestCase):
         )
         self.assertIn("LoRACompatibilityAnalyzer", lora_optimizer.NODE_CLASS_MAPPINGS)
 
+    def test_autotune_resolve_tree_calls_auto_tune_for_subgroups(self):
+        """_autotune_resolve_tree should call auto_tune for sub-groups with 2+ items."""
+        from lora_optimizer import LoRAAutoTuner, _parse_merge_formula
+
+        tuner = LoRAAutoTuner()
+        tree = _parse_merge_formula("(1+2)+3", 3)
+
+        # Build a minimal normalized stack with 3 fake LoRAs
+        fake_lora_a = {"key_a": torch.randn(4, 4)}
+        fake_lora_b = {"key_a": torch.randn(4, 4)}
+        fake_lora_c = {"key_c": torch.randn(4, 4)}
+        normalized_stack = [
+            {"name": "lora_a", "lora": fake_lora_a, "strength": 1.0,
+             "clip_strength": None, "metadata": {}},
+            {"name": "lora_b", "lora": fake_lora_b, "strength": 1.0,
+             "clip_strength": None, "metadata": {}},
+            {"name": "lora_c", "lora": fake_lora_c, "strength": 1.0,
+             "clip_strength": None, "metadata": {}},
+        ]
+
+        # Track auto_tune calls
+        calls = []
+
+        def mock_auto_tune(model, lora_stack, output_strength, **kwargs):
+            calls.append({"n_loras": len(lora_stack), "names": [l["name"] for l in lora_stack]})
+            # Return a minimal 6-tuple with virtual LoRA patches
+            virtual_patches = {"key_a": ("diff", (torch.randn(4, 4),))}
+            lora_data = {"model_patches": virtual_patches, "clip_patches": {}}
+            return (model, None, "sub-report", "", None, lora_data)
+
+        tuner.auto_tune = mock_auto_tune
+
+        at_kwargs = {
+            "clip_strength_multiplier": 1.0,
+            "top_n": 3,
+            "normalize_keys": "disabled",
+            "scoring_svd": "disabled",
+            "scoring_device": "cpu",
+            "architecture_preset": "dit",
+            "auto_strength_floor": -1.0,
+            "decision_smoothing": 0.25,
+            "smooth_slerp_gate": False,
+            "vram_budget": 0.0,
+            "scoring_speed": "turbo",
+            "scoring_formula": "v2",
+            "diff_cache_mode": "disabled",
+            "diff_cache_ram_pct": 0.5,
+        }
+
+        resolved_stack, sub_reports = tuner._autotune_resolve_tree(
+            tree, normalized_stack, None, None, **at_kwargs)
+
+        # Should have called auto_tune once for the (1+2) sub-group
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["n_loras"], 2)
+        self.assertEqual(calls[0]["names"], ["lora_a", "lora_b"])
+
+        # Resolved stack should have 2 items: virtual LoRA + lora_c
+        self.assertEqual(len(resolved_stack), 2)
+        self.assertTrue(resolved_stack[0].get("_precomputed_diffs"))  # virtual
+        self.assertEqual(resolved_stack[1]["name"], "lora_c")
+        self.assertEqual(len(sub_reports), 1)
+
+    def test_autotune_resolve_tree_passes_sub_merge_flags(self):
+        """Sub-merge auto_tune calls should include _is_sub_merge and _suppress_pbar."""
+        from lora_optimizer import LoRAAutoTuner, _parse_merge_formula
+
+        tuner = LoRAAutoTuner()
+        tree = _parse_merge_formula("(1+2)+3", 3)
+
+        fake_lora_a = {"key_a": torch.randn(4, 4)}
+        fake_lora_b = {"key_a": torch.randn(4, 4)}
+        fake_lora_c = {"key_c": torch.randn(4, 4)}
+        normalized_stack = [
+            {"name": "lora_a", "lora": fake_lora_a, "strength": 1.0,
+             "clip_strength": None, "metadata": {}},
+            {"name": "lora_b", "lora": fake_lora_b, "strength": 1.0,
+             "clip_strength": None, "metadata": {}},
+            {"name": "lora_c", "lora": fake_lora_c, "strength": 1.0,
+             "clip_strength": None, "metadata": {}},
+        ]
+
+        calls = []
+        def mock_auto_tune(model, lora_stack, output_strength, **kwargs):
+            calls.append(kwargs)
+            virtual_patches = {"key_a": ("diff", (torch.randn(4, 4),))}
+            lora_data = {"model_patches": virtual_patches, "clip_patches": {}}
+            return (model, None, "sub-report", "", None, lora_data)
+
+        tuner.auto_tune = mock_auto_tune
+
+        at_kwargs = {
+            "clip_strength_multiplier": 1.0,
+            "top_n": 3, "normalize_keys": "disabled", "scoring_svd": "disabled",
+            "scoring_device": "cpu", "architecture_preset": "dit",
+            "auto_strength_floor": -1.0, "decision_smoothing": 0.25,
+            "smooth_slerp_gate": False, "vram_budget": 0.0,
+            "scoring_speed": "turbo", "scoring_formula": "v2",
+            "diff_cache_mode": "disabled", "diff_cache_ram_pct": 0.5,
+        }
+
+        tuner._autotune_resolve_tree(tree, normalized_stack, None, None, **at_kwargs)
+
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(calls[0].get("_is_sub_merge", False))
+        self.assertTrue(calls[0].get("_suppress_pbar", False))
+        self.assertEqual(calls[0].get("cache_patches"), "disabled")
+        self.assertEqual(calls[0].get("record_dataset"), "disabled")
+        self.assertEqual(calls[0].get("output_mode"), "merge")
+
+    def test_autotune_resolve_tree_single_item_passthrough(self):
+        """Single-item sub-groups should pass through without calling auto_tune."""
+        from lora_optimizer import LoRAAutoTuner, _parse_merge_formula
+
+        tuner = LoRAAutoTuner()
+        tree = _parse_merge_formula("(1)+2", 2)
+
+        fake_lora_a = {"key_a": torch.randn(4, 4)}
+        fake_lora_b = {"key_b": torch.randn(4, 4)}
+        normalized_stack = [
+            {"name": "lora_a", "lora": fake_lora_a, "strength": 1.0,
+             "clip_strength": None, "metadata": {}},
+            {"name": "lora_b", "lora": fake_lora_b, "strength": 1.0,
+             "clip_strength": None, "metadata": {}},
+        ]
+
+        calls = []
+        def mock_auto_tune(model, lora_stack, output_strength, **kwargs):
+            calls.append(True)
+            return (model, None, "", "", None, None)
+
+        tuner.auto_tune = mock_auto_tune
+
+        at_kwargs = {
+            "clip_strength_multiplier": 1.0,
+            "top_n": 3, "normalize_keys": "disabled", "scoring_svd": "disabled",
+            "scoring_device": "cpu", "architecture_preset": "dit",
+            "auto_strength_floor": -1.0, "decision_smoothing": 0.25,
+            "smooth_slerp_gate": False, "vram_budget": 0.0,
+            "scoring_speed": "turbo", "scoring_formula": "v2",
+            "diff_cache_mode": "disabled", "diff_cache_ram_pct": 0.5,
+        }
+
+        resolved_stack, sub_reports = tuner._autotune_resolve_tree(
+            tree, normalized_stack, None, None, **at_kwargs)
+
+        self.assertEqual(len(calls), 0)
+        self.assertEqual(len(resolved_stack), 2)
+        self.assertEqual(resolved_stack[0]["name"], "lora_a")
+        self.assertEqual(resolved_stack[1]["name"], "lora_b")
+
+    def test_autotune_resolve_tree_nested_groups(self):
+        """Nested formula ((1+2)+3)+4 should resolve innermost first."""
+        from lora_optimizer import LoRAAutoTuner, _parse_merge_formula
+
+        tuner = LoRAAutoTuner()
+        tree = _parse_merge_formula("((1+2)+3)+4", 4)
+
+        normalized_stack = []
+        for i in range(4):
+            normalized_stack.append({
+                "name": f"lora_{i}", "lora": {f"key_{i}": torch.randn(4, 4)},
+                "strength": 1.0, "clip_strength": None, "metadata": {},
+            })
+
+        call_order = []
+        def mock_auto_tune(model, lora_stack, output_strength, **kwargs):
+            names = [l["name"] for l in lora_stack if not l.get("_precomputed_diffs")]
+            virtual_count = sum(1 for l in lora_stack if l.get("_precomputed_diffs"))
+            call_order.append({"names": names, "virtual_count": virtual_count,
+                               "total": len(lora_stack)})
+            virtual_patches = {f"key_v{len(call_order)}": ("diff", (torch.randn(4, 4),))}
+            lora_data = {"model_patches": virtual_patches, "clip_patches": {}}
+            return (model, None, f"sub-report-{len(call_order)}", "", None, lora_data)
+
+        tuner.auto_tune = mock_auto_tune
+
+        at_kwargs = {
+            "clip_strength_multiplier": 1.0,
+            "top_n": 3, "normalize_keys": "disabled", "scoring_svd": "disabled",
+            "scoring_device": "cpu", "architecture_preset": "dit",
+            "auto_strength_floor": -1.0, "decision_smoothing": 0.25,
+            "smooth_slerp_gate": False, "vram_budget": 0.0,
+            "scoring_speed": "turbo", "scoring_formula": "v2",
+            "diff_cache_mode": "disabled", "diff_cache_ram_pct": 0.5,
+        }
+
+        resolved_stack, sub_reports = tuner._autotune_resolve_tree(
+            tree, normalized_stack, None, None, **at_kwargs)
+
+        # Two auto_tune calls: (1+2) first, then (virtual+3)
+        self.assertEqual(len(call_order), 2)
+        self.assertEqual(call_order[0]["names"], ["lora_0", "lora_1"])
+        self.assertEqual(call_order[0]["virtual_count"], 0)
+        self.assertEqual(call_order[1]["total"], 2)
+        self.assertEqual(call_order[1]["virtual_count"], 1)
+
+        # Final stack: virtual from ((1+2)+3) + lora_3
+        self.assertEqual(len(resolved_stack), 2)
+        self.assertTrue(resolved_stack[0].get("_precomputed_diffs"))
+        self.assertEqual(resolved_stack[1]["name"], "lora_3")
+
+    def test_auto_tune_with_formula_calls_autotune_resolve_tree(self):
+        """auto_tune should detect formula and use _autotune_resolve_tree."""
+        tuner = lora_optimizer.LoRAAutoTuner()
+
+        # Build a lora_stack with formula metadata
+        fake_lora_a = {"key_a": torch.randn(4, 4)}
+        fake_lora_b = {"key_a": torch.randn(4, 4)}
+        fake_lora_c = {"key_c": torch.randn(4, 4)}
+        lora_stack = [
+            {"name": "lora_a", "lora": fake_lora_a, "strength": 1.0},
+            {"name": "lora_b", "lora": fake_lora_b, "strength": 1.0},
+            {"name": "lora_c", "lora": fake_lora_c, "strength": 1.0},
+            {"_merge_formula": "(1+2)+3"},
+        ]
+
+        # Track _autotune_resolve_tree calls
+        resolve_calls = []
+
+        def mock_resolve(tree, normalized_stack, model, clip, **kwargs):
+            resolve_calls.append(tree)
+            # Return a flat stack (2 items) so auto_tune continues normally
+            return ([normalized_stack[0], normalized_stack[2]], [])
+
+        tuner._autotune_resolve_tree = mock_resolve
+
+        # Mock the rest of auto_tune to avoid needing real models
+        # We just need to verify _autotune_resolve_tree was called
+        try:
+            tuner.auto_tune(None, lora_stack, 1.0)
+        except Exception:
+            pass  # Will fail later in pipeline — we only check the call happened
+
+        self.assertEqual(len(resolve_calls), 1)
+        self.assertEqual(resolve_calls[0]["type"], "group")
+
 
 @unittest.skipIf(torch is None, "torch is not installed in this environment")
 class LoRASettingsNodeTests(unittest.TestCase):
@@ -672,6 +909,181 @@ class LoRASettingsNodeTests(unittest.TestCase):
                              f"_DEFAULTS[{key}]={defaults_dict[key]} != INPUT_TYPES default={input_default}")
         self.assertEqual(set(defaults_dict.keys()), set(inputs["required"].keys()),
                          "_DEFAULTS keys don't match INPUT_TYPES keys")
+
+
+    # --- Merge formula parser tests ---
+
+    def test_parse_merge_formula_simple(self):
+        """Simple flat formula parses to group of leaves."""
+        tree = lora_optimizer._parse_merge_formula("1 + 2 + 3", 3)
+        self.assertEqual(tree["type"], "group")
+        self.assertEqual(len(tree["children"]), 3)
+        for i, child in enumerate(tree["children"]):
+            self.assertEqual(child["type"], "leaf")
+            self.assertEqual(child["index"], i)
+
+    def test_parse_merge_formula_nested(self):
+        """Nested formula parses to tree with sub-group."""
+        tree = lora_optimizer._parse_merge_formula("(1+2) + 3", 3)
+        self.assertEqual(tree["type"], "group")
+        self.assertEqual(len(tree["children"]), 2)
+        sub = tree["children"][0]
+        self.assertEqual(sub["type"], "group")
+        self.assertEqual(len(sub["children"]), 2)
+        leaf3 = tree["children"][1]
+        self.assertEqual(leaf3["type"], "leaf")
+        self.assertEqual(leaf3["index"], 2)
+
+    def test_parse_merge_formula_weights(self):
+        """Weights are parsed from :N.N suffix."""
+        tree = lora_optimizer._parse_merge_formula("(1+2):0.6 + 3:0.4", 3)
+        self.assertAlmostEqual(tree["children"][0]["weight"], 0.6)
+        self.assertAlmostEqual(tree["children"][1]["weight"], 0.4)
+
+    def test_parse_merge_formula_deep_nesting(self):
+        """Deep nesting: ((1+2)+3) + 4."""
+        tree = lora_optimizer._parse_merge_formula("((1+2)+3) + 4", 4)
+        self.assertEqual(tree["type"], "group")
+        self.assertEqual(len(tree["children"]), 2)
+        inner = tree["children"][0]
+        self.assertEqual(inner["type"], "group")
+        self.assertEqual(len(inner["children"]), 2)
+        innermost = inner["children"][0]
+        self.assertEqual(innermost["type"], "group")
+        self.assertEqual(len(innermost["children"]), 2)
+
+    def test_parse_merge_formula_single_item(self):
+        """Single item is valid."""
+        tree = lora_optimizer._parse_merge_formula("1", 1)
+        self.assertEqual(tree["type"], "leaf")
+        self.assertEqual(tree["index"], 0)
+
+    def test_parse_merge_formula_out_of_range(self):
+        """Out of range index raises ValueError."""
+        with self.assertRaises(ValueError):
+            lora_optimizer._parse_merge_formula("1 + 5", 3)
+
+    def test_parse_merge_formula_malformed(self):
+        """Malformed formula raises ValueError."""
+        with self.assertRaises(ValueError):
+            lora_optimizer._parse_merge_formula("((1+2", 3)
+
+    def test_parse_merge_formula_empty(self):
+        """Empty/whitespace formula raises ValueError."""
+        with self.assertRaises(ValueError):
+            lora_optimizer._parse_merge_formula("", 3)
+        with self.assertRaises(ValueError):
+            lora_optimizer._parse_merge_formula("   ", 3)
+
+
+    def test_merge_formula_node_registered(self):
+        """LoRAMergeFormula is registered in NODE_CLASS_MAPPINGS."""
+        self.assertIn("LoRAMergeFormula", lora_optimizer.NODE_CLASS_MAPPINGS)
+        self.assertIn("LoRAMergeFormula", lora_optimizer.NODE_DISPLAY_NAME_MAPPINGS)
+
+    def test_merge_formula_node_passthrough(self):
+        """LoRAMergeFormula passes stack through with formula metadata."""
+        node = lora_optimizer.LoRAMergeFormula()
+        stack = [{"name": "a", "lora": {}, "strength": 1.0}]
+        result = node.apply_formula(stack, "(1)")
+        self.assertIsInstance(result, tuple)
+        output_stack = result[0]
+        has_formula = any(isinstance(item, dict) and "_merge_formula" in item for item in output_stack)
+        self.assertTrue(has_formula)
+
+    def test_merge_formula_node_validates(self):
+        """LoRAMergeFormula validates formula syntax — invalid returns stack without formula."""
+        node = lora_optimizer.LoRAMergeFormula()
+        stack = [{"name": "a", "lora": {}, "strength": 1.0}]
+        result = node.apply_formula(stack, "(1+2)")  # only 1 LoRA — out of range
+        output_stack = result[0]
+        self.assertIsInstance(output_stack, list)
+        # Should NOT have formula metadata since validation failed
+        has_formula = any(isinstance(item, dict) and "_merge_formula" in item for item in output_stack)
+        self.assertFalse(has_formula)
+
+
+    # ------------------------------------------------------------------
+    #  Merge formula tree executor + optimize_merge integration
+    # ------------------------------------------------------------------
+
+    def test_normalize_stack_filters_formula_metadata(self):
+        """_normalize_stack filters out formula metadata entries."""
+        stack = [
+            {"name": "a", "lora": {}, "strength": 1.0},
+            {"_merge_formula": "(1+2)"},
+            {"name": "b", "lora": {}, "strength": 1.0},
+        ]
+        opt = lora_optimizer.LoRAOptimizer()
+        result = opt._normalize_stack(stack)
+        self.assertEqual(len(result), 2)
+        names = [item["name"] for item in result]
+        self.assertEqual(names, ["a", "b"])
+
+    def test_optimize_merge_extracts_formula_metadata(self):
+        """optimize_merge strips formula metadata before normalization."""
+        stack = [
+            {"name": "a", "lora": {"key1": ("diff", (torch.randn(4, 4),))}, "strength": 1.0},
+            {"name": "b", "lora": {"key1": ("diff", (torch.randn(4, 4),))}, "strength": 1.0},
+            {"_merge_formula": "1 + 2"},
+        ]
+        opt = lora_optimizer.LoRAOptimizer()
+        # model=None → optimize_merge returns early with a report (no model to patch)
+        result = opt.optimize_merge(None, stack, 1.0)
+        self.assertIsNotNone(result)
+        self.assertEqual(len(result), 5)  # 5-tuple
+
+    def test_optimize_merge_invalid_formula_falls_back(self):
+        """Invalid formula logs a warning and falls back to flat merge."""
+        stack = [
+            {"name": "a", "lora": {"key1": ("diff", (torch.randn(4, 4),))}, "strength": 1.0},
+            {"name": "b", "lora": {"key1": ("diff", (torch.randn(4, 4),))}, "strength": 1.0},
+            {"_merge_formula": "((1+2"},  # malformed
+        ]
+        opt = lora_optimizer.LoRAOptimizer()
+        result = opt.optimize_merge(None, stack, 1.0)
+        self.assertIsNotNone(result)
+        self.assertEqual(len(result), 5)
+
+    def test_model_to_virtual_lora_label(self):
+        """_model_to_virtual_lora produces correct tree labels."""
+        tree_node = {
+            "type": "group",
+            "weight": None,
+            "children": [
+                {"type": "leaf", "index": 0, "weight": None},
+                {"type": "leaf", "index": 1, "weight": None},
+            ],
+        }
+        virtual = lora_optimizer.LoRAOptimizer._model_to_virtual_lora(
+            {}, {}, tree_node)
+        self.assertEqual(virtual["name"], "(1+2)")
+        self.assertEqual(virtual["strength"], 1.0)
+        self.assertIsInstance(virtual["lora"], dict)
+        self.assertTrue(virtual["_precomputed_diffs"])
+
+    def test_resolve_tree_to_stack_flat(self):
+        """_resolve_tree_to_stack resolves a flat group to the original items."""
+        opt = lora_optimizer.LoRAOptimizer()
+        normalized = [
+            {"name": "a", "lora": {}, "strength": 0.8, "clip_strength": None,
+             "conflict_mode": "all", "key_filter": "all", "metadata": {}},
+            {"name": "b", "lora": {}, "strength": 0.6, "clip_strength": None,
+             "conflict_mode": "all", "key_filter": "all", "metadata": {}},
+        ]
+        tree = {
+            "type": "group",
+            "weight": None,
+            "children": [
+                {"type": "leaf", "index": 0, "weight": None},
+                {"type": "leaf", "index": 1, "weight": 0.5},
+            ],
+        }
+        resolved, reports = opt._resolve_tree_to_stack(tree, normalized, None, None)
+        self.assertEqual(len(resolved), 2)
+        self.assertEqual(resolved[0]["strength"], 0.8)  # unchanged
+        self.assertEqual(resolved[1]["strength"], 0.5)  # overridden by weight
+        self.assertEqual(reports, [])
 
 
 if __name__ == "__main__":
