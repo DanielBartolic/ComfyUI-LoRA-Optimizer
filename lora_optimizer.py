@@ -6772,7 +6772,7 @@ class LoRAAutoTunerSettings:
                     "tooltip": "Saves detailed scoring data to a file for analysis. Only useful for developers tuning the scoring system."
                 }),
                 "memory_mode": (["disabled", "auto", "read_only", "clear_and_run"], {
-                    "default": "disabled",
+                    "default": "auto",
                     "tooltip": "Persistent memory for tuning results across sessions.\n"
                                "auto: Load cached results if available, save after tuning.\n"
                                "read_only: Use cached results but don't save new ones.\n"
@@ -7130,7 +7130,7 @@ class LoRAAutoTuner(LoRAOptimizer):
                     "tooltip": "When enabled, uses smoothed cosine (decision_cosine) for SLERP gate instead of raw avg_cos_sim. Can affect SLERP/weighted_average ratio."
                 }),
                 "memory_mode": (["disabled", "auto", "read_only", "clear_and_run"], {
-                    "default": "disabled",
+                    "default": "auto",
                     "tooltip": "Persistent memory for tuning results across sessions.\n"
                                "auto: Load cached results if available, save after tuning.\n"
                                "read_only: Use cached results but don't save new ones.\n"
