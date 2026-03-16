@@ -13,6 +13,7 @@ import hashlib
 import time
 import re
 import gc
+import glob
 import importlib
 import importlib.util
 import concurrent.futures
@@ -42,6 +43,11 @@ from safetensors.torch import save_file
 TUNER_DATA_DIR = os.path.join(folder_paths.models_dir, "tuner_data")
 os.makedirs(TUNER_DATA_DIR, exist_ok=True)
 folder_paths.add_model_folder_path("tuner_data", TUNER_DATA_DIR)
+
+AUTOTUNER_MEMORY_DIR = os.path.join(folder_paths.models_dir, "autotuner_memory")
+os.makedirs(AUTOTUNER_MEMORY_DIR, exist_ok=True)
+AUTOTUNER_MEMORY_VERSION = 1
+AUTOTUNER_ALGO_VERSION = "1.4.5"  # Bump when scoring/analysis logic changes
 
 
 
@@ -6765,6 +6771,13 @@ class LoRAAutoTunerSettings:
                     "default": "disabled",
                     "tooltip": "Saves detailed scoring data to a file for analysis. Only useful for developers tuning the scoring system."
                 }),
+                "memory_mode": (["disabled", "auto", "read_only", "clear_and_run"], {
+                    "default": "disabled",
+                    "tooltip": "Persistent memory for tuning results across sessions.\n"
+                               "auto: Load cached results if available, save after tuning.\n"
+                               "read_only: Use cached results but don't save new ones.\n"
+                               "clear_and_run: Delete cached entry and re-tune from scratch."
+                }),
             },
             "optional": {
                 "merge_settings": ("MERGE_SETTINGS", {
@@ -6788,6 +6801,7 @@ class LoRAAutoTunerSettings:
     def build_settings(self, top_n, scoring_svd, scoring_device, scoring_speed,
                        scoring_formula,
                        diff_cache_mode, diff_cache_ram_pct, record_dataset,
+                       memory_mode="disabled",
                        merge_settings=None, evaluator=None):
         ms = merge_settings if merge_settings is not None else LoRAMergeSettings._DEFAULTS
         return ({
@@ -6809,6 +6823,7 @@ class LoRAAutoTunerSettings:
             "diff_cache_ram_pct": diff_cache_ram_pct,
             "record_dataset": record_dataset,
             "evaluator": evaluator,
+            "memory_mode": memory_mode,
         },)
 
 
@@ -6941,6 +6956,7 @@ class LoRAOptimizerSimple(LoRAOptimizer):
                     diff_cache_ram_pct=settings["diff_cache_ram_pct"],
                     record_dataset=settings["record_dataset"],
                     evaluator=settings.get("evaluator"),
+                    memory_mode=settings.get("memory_mode", "disabled"),
                 )
                 # Map 6-value AutoTuner return to 5-value Simple return
                 # (model, clip, report, analysis_report, tuner_data, lora_data)
@@ -7113,6 +7129,15 @@ class LoRAAutoTuner(LoRAOptimizer):
                     "default": False,
                     "tooltip": "When enabled, uses smoothed cosine (decision_cosine) for SLERP gate instead of raw avg_cos_sim. Can affect SLERP/weighted_average ratio."
                 }),
+                "memory_mode": (["disabled", "auto", "read_only", "clear_and_run"], {
+                    "default": "disabled",
+                    "tooltip": "Persistent memory for tuning results across sessions.\n"
+                               "auto: Load cached results if available, save after tuning.\n"
+                               "read_only: Use cached results but don't save new ones.\n"
+                               "clear_and_run: Delete cached entry and re-tune from scratch.\n\n"
+                               "Cache key uses LoRA names + strengths (order-independent) and tuning settings. "
+                               "Does not track LoRA file contents — if you retrain a LoRA with the same filename, use clear_and_run."
+                }),
             },
         }
 
@@ -7126,6 +7151,118 @@ class LoRAAutoTuner(LoRAOptimizer):
         "directly. Connect TUNER_DATA to a Merge Selector node to try alternatives."
     )
 
+    # --- Persistent memory helpers ---
+
+    @staticmethod
+    def _memory_settings_hash(settings):
+        """SHA256[:16] of JSON-serialized tuning-relevant settings."""
+        raw = json.dumps(settings, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+    @staticmethod
+    def _memory_file_path(lora_hash, settings_hash):
+        """Build full path for a memory file."""
+        return os.path.join(AUTOTUNER_MEMORY_DIR,
+                            f"{lora_hash}_{settings_hash}.memory.json")
+
+    @staticmethod
+    def _memory_load(lora_hash, settings_hash, requested_top_n):
+        """Load and validate a memory entry. Returns tuner_data or None."""
+        path = LoRAAutoTuner._memory_file_path(lora_hash, settings_hash)
+        if not os.path.exists(path):
+            return None
+        try:
+            with open(path, "r") as f:
+                data = json.load(f)
+        except Exception:
+            logging.warning(f"[AutoTuner Memory] Corrupt memory file, ignoring: {path}")
+            return None
+
+        # Version check
+        if data.get("algo_version") != AUTOTUNER_ALGO_VERSION:
+            logging.info(f"[AutoTuner Memory] Stale algo version "
+                         f"({data.get('algo_version')} != {AUTOTUNER_ALGO_VERSION}), ignoring")
+            return None
+        if data.get("memory_version") != AUTOTUNER_MEMORY_VERSION:
+            logging.info("[AutoTuner Memory] Stale memory version, ignoring")
+            return None
+
+        tuner_data = data.get("tuner_data")
+        if not tuner_data or "top_n" not in tuner_data:
+            return None
+
+        # top_n count check — stored must have enough entries
+        if len(tuner_data["top_n"]) < requested_top_n:
+            logging.info(f"[AutoTuner Memory] Stored top_n={len(tuner_data['top_n'])} "
+                         f"< requested={requested_top_n}, ignoring")
+            return None
+
+        return tuner_data
+
+    @staticmethod
+    def _memory_save(lora_hash, settings_hash, settings, source_loras, tuner_data):
+        """Atomic write of memory entry to disk."""
+        from datetime import datetime
+        path = LoRAAutoTuner._memory_file_path(lora_hash, settings_hash)
+        entry = {
+            "memory_version": AUTOTUNER_MEMORY_VERSION,
+            "algo_version": AUTOTUNER_ALGO_VERSION,
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+            "lora_hash": lora_hash,
+            "settings_hash": settings_hash,
+            "settings": settings,
+            "source_loras": [{"name": l["name"], "strength": l["strength"]}
+                             for l in source_loras],
+            "tuner_data": tuner_data,
+        }
+        try:
+            tmp_path = path + ".tmp"
+            with open(tmp_path, "w") as f:
+                json.dump(entry, f, indent=2)
+            os.replace(tmp_path, path)
+            logging.info(f"[AutoTuner Memory] Saved: {path}")
+        except Exception as e:
+            logging.warning(f"[AutoTuner Memory] Failed to save: {e}")
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+    @staticmethod
+    def _memory_clear(lora_hash=None, settings_hash=None):
+        """Delete memory files. Both None = clear all. lora_hash only = all for that combo."""
+        if lora_hash and settings_hash:
+            path = LoRAAutoTuner._memory_file_path(lora_hash, settings_hash)
+            if os.path.exists(path):
+                os.unlink(path)
+                logging.info(f"[AutoTuner Memory] Deleted: {path}")
+        elif lora_hash:
+            pattern = os.path.join(AUTOTUNER_MEMORY_DIR, f"{lora_hash}_*.memory.json")
+            for path in glob.glob(pattern):
+                os.unlink(path)
+                logging.info(f"[AutoTuner Memory] Deleted: {path}")
+        else:
+            pattern = os.path.join(AUTOTUNER_MEMORY_DIR, "*.memory.json")
+            for path in glob.glob(pattern):
+                os.unlink(path)
+            logging.info("[AutoTuner Memory] Cleared all memory files")
+
+    def _build_memory_hit_report(self, lora_hash, tuner_data, output_strength,
+                                 scoring_speed="full"):
+        """Build report for a memory cache hit."""
+        banner = (
+            "=" * 54 + "\n"
+            "  MEMORY HIT — Results loaded from persistent cache\n"
+            f"  LoRA hash: {lora_hash}\n"
+            "  Set memory_mode='clear_and_run' to re-tune.\n"
+            "=" * 54 + "\n\n"
+        )
+        results = tuner_data["top_n"]
+        report = self._build_autotuner_report(
+            results, tuner_data["analysis_summary"], output_strength,
+            scoring_speed=scoring_speed)
+        return banner + report
+
     def auto_tune(self, model, lora_stack, output_strength, clip=None,
                   clip_strength_multiplier=1.0, top_n=3, normalize_keys="disabled",
                   scoring_svd="disabled", scoring_device="gpu",
@@ -7135,6 +7272,7 @@ class LoRAAutoTuner(LoRAOptimizer):
                   diff_cache_mode="disabled", diff_cache_ram_pct=0.5, vram_budget=0.0,
                   scoring_speed="full", scoring_formula="v2", output_mode="merge",
                   decision_smoothing=0.25, smooth_slerp_gate=False,
+                  memory_mode="disabled",
                   _is_sub_merge=False, _suppress_pbar=False):
         import hashlib, json
 
@@ -7230,6 +7368,7 @@ class LoRAAutoTuner(LoRAOptimizer):
                         output_mode=output_mode,
                         decision_smoothing=decision_smoothing,
                         smooth_slerp_gate=smooth_slerp_gate,
+                        memory_mode=memory_mode,
                         _is_sub_merge=_is_sub_merge,
                         _suppress_pbar=_suppress_pbar,
                     )
@@ -7281,6 +7420,13 @@ class LoRAAutoTuner(LoRAOptimizer):
                                 sort_keys=True)
         lora_hash = hashlib.sha256(hash_input.encode()).hexdigest()[:16]
 
+        # Order-independent hash for persistent memory (sorted pairs)
+        if memory_mode != "disabled" and not _is_sub_merge:
+            memory_lora_hash = hashlib.sha256(
+                json.dumps(sorted([(l["name"], l["strength"]) for l in active_loras]),
+                           separators=(",", ":")).encode()
+            ).hexdigest()[:16]
+
         evaluator_hash = self._stable_data_hash(evaluator) if evaluator is not None else ""
 
         # Check AutoTuner cache
@@ -7298,6 +7444,83 @@ class LoRAAutoTuner(LoRAOptimizer):
             if cached_mode == "merge":
                 logging.info("[LoRA AutoTuner] Using cached result")
                 return cached_result
+
+        # --- Persistent memory lookup ---
+        if memory_mode != "disabled" and not _is_sub_merge:
+            memory_settings = {
+                "normalize_keys": normalize_keys,
+                "scoring_svd": scoring_svd,
+                "scoring_device": scoring_device,
+                "architecture_preset": architecture_preset,
+                "auto_strength_floor": auto_strength_floor,
+                "scoring_speed": scoring_speed,
+                "scoring_formula": scoring_formula,
+                "decision_smoothing": decision_smoothing,
+                "smooth_slerp_gate": smooth_slerp_gate,
+                "evaluator_hash": evaluator_hash,
+            }
+            settings_hash = self._memory_settings_hash(memory_settings)
+
+            if memory_mode == "clear_and_run":
+                self._memory_clear(memory_lora_hash, settings_hash)
+
+            if memory_mode in ("auto", "read_only"):
+                cached_tuner_data = self._memory_load(
+                    memory_lora_hash, settings_hash, top_n)
+                if cached_tuner_data is not None:
+                    logging.info("[AutoTuner Memory] HIT — loading cached tuning results")
+                    # Truncate top_n if needed
+                    if len(cached_tuner_data["top_n"]) > top_n:
+                        cached_tuner_data["top_n"] = cached_tuner_data["top_n"][:top_n]
+
+                    report = self._build_memory_hit_report(
+                        memory_lora_hash, cached_tuner_data, output_strength,
+                        scoring_speed=scoring_speed)
+
+                    if output_mode == "tuning_only":
+                        result = (model, clip, report, "", cached_tuner_data, None)
+                        if cache_patches == "enabled":
+                            if not hasattr(self, '_autotuner_cache'):
+                                self._autotuner_cache = {}
+                            self._autotuner_cache[at_cache_key] = (result, "tuning_only")
+                        return result
+
+                    # Replay the rank-1 config via optimize_merge
+                    config = cached_tuner_data["top_n"][0]["config"]
+                    strategy_override = (config["merge_mode"]
+                                         if config["optimization_mode"] == "global" else "")
+                    merged_model, merged_clip, _replay_report, _, lora_data = super().optimize_merge(
+                        model, lora_stack, output_strength,
+                        clip=clip,
+                        clip_strength_multiplier=clip_strength_multiplier,
+                        auto_strength=config["auto_strength"],
+                        auto_strength_floor=cached_tuner_data.get(
+                            "auto_strength_floor", auto_strength_floor),
+                        optimization_mode=config["optimization_mode"],
+                        sparsification=config["sparsification"],
+                        sparsification_density=config["sparsification_density"],
+                        dare_dampening=config["dare_dampening"],
+                        merge_refinement=config["merge_refinement"],
+                        merge_strategy_override=strategy_override,
+                        strategy_set=config.get("strategy_set", "full"),
+                        normalize_keys=cached_tuner_data.get(
+                            "normalize_keys", normalize_keys),
+                        architecture_preset=cached_tuner_data.get(
+                            "architecture_preset", architecture_preset),
+                        decision_smoothing=cached_tuner_data.get(
+                            "decision_smoothing", decision_smoothing),
+                        smooth_slerp_gate=smooth_slerp_gate,
+                        cache_patches=cache_patches,
+                        vram_budget=vram_budget,
+                    )
+
+                    result = (merged_model, merged_clip, report,
+                              _replay_report, cached_tuner_data, lora_data)
+                    if cache_patches == "enabled":
+                        if not hasattr(self, '_autotuner_cache'):
+                            self._autotuner_cache = {}
+                        self._autotuner_cache[at_cache_key] = (result, "merge")
+                    return result
 
         # --- Pass 1: Analysis (run once, reuse for all configs) ---
         model_keys = self._get_model_keys(model)
@@ -7806,6 +8029,24 @@ class LoRAAutoTuner(LoRAOptimizer):
                 getattr(self, '_detected_arch', None))
         prefix_stats.clear()
 
+        # Save to persistent memory
+        if memory_mode in ("auto", "clear_and_run") and not _is_sub_merge:
+            memory_settings = {
+                "normalize_keys": normalize_keys,
+                "scoring_svd": scoring_svd,
+                "scoring_device": scoring_device,
+                "architecture_preset": architecture_preset,
+                "auto_strength_floor": auto_strength_floor,
+                "scoring_speed": scoring_speed,
+                "scoring_formula": scoring_formula,
+                "decision_smoothing": decision_smoothing,
+                "smooth_slerp_gate": smooth_slerp_gate,
+                "evaluator_hash": evaluator_hash,
+            }
+            settings_hash = self._memory_settings_hash(memory_settings)
+            self._memory_save(memory_lora_hash, settings_hash,
+                              memory_settings, active_loras, tuner_data)
+
         # Build report
         suggested_max = best_lora_data.get("suggested_max_strength") if best_lora_data else None
         report = self._build_autotuner_report(
@@ -8090,12 +8331,12 @@ class LoRAAutoTuner(LoRAOptimizer):
                    diff_cache_mode="disabled", diff_cache_ram_pct=0.5,
                    vram_budget=0.0, scoring_speed="full", scoring_formula="v2",
                    output_mode="merge", decision_smoothing=0.25,
-                   smooth_slerp_gate=False):
+                   smooth_slerp_gate=False, memory_mode="disabled"):
         evaluator_hash = cls._stable_data_hash(evaluator) if evaluator is not None else ""
         return (id(model), id(lora_stack), output_strength, clip_strength_multiplier, top_n,
                 normalize_keys, scoring_svd, scoring_device, architecture_preset,
                 vram_budget, record_dataset, scoring_speed, scoring_formula, output_mode,
-                auto_strength_floor, decision_smoothing, evaluator_hash)
+                auto_strength_floor, decision_smoothing, evaluator_hash, memory_mode)
 
 
 class LoRAMergeSelector(LoRAOptimizer):
